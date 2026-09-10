@@ -39,3 +39,8 @@ slider gradients use cached textures rather than many overlapping IMGUI rectangl
 The left divider resizes the source and preview column. The large preview can show the final output or the
 selected node, isolate R/G/B/A, zoom around the cursor with the wheel, and pan by dragging. Zoom changes the
 sampled UV region, so the worker renders only the visible portion; `1:1` matches source texels to preview pixels.
+
+Preview jobs are canceled when superseded. Non-selected node results are retained only as 96-pixel thumbnails,
+the selected node owns the one full viewport-sized result, and caches are pruned when nodes or output tabs change.
+Preview source capture uses compact linear RGBA32 storage; final exported textures keep the high-precision path.
+Closing the window destroys all preview, gradient, and editor-chrome textures immediately.

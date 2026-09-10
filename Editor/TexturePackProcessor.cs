@@ -12,8 +12,11 @@ namespace TexturePackEditor
         private readonly int _width;
         private readonly int _height;
         private readonly Rect _uvRect;
+        private readonly bool _compact;
         private readonly Dictionary<Texture2D, Color[]> _pixels = new();
         private readonly Dictionary<string, Color[]> _preparedNodePixels = new();
+        private readonly Dictionary<Texture2D, Color32[]> _compactPixels = new();
+        private readonly Dictionary<string, Color32[]> _preparedCompactNodePixels = new();
         private bool _prepared;
 
         public int Width => _width;
@@ -24,20 +27,36 @@ namespace TexturePackEditor
         {
         }
 
-        public TexturePackPixelSession(TexturePackSourceSet sources, int width, int height, Rect uvRect)
+        public TexturePackPixelSession(TexturePackSourceSet sources, int width, int height, Rect uvRect,
+            bool compact = false)
         {
             _sources = sources;
             _width = width;
             _height = height;
             _uvRect = uvRect;
+            _compact = compact;
         }
 
         public Color Sample(TexturePackNode node, int pixel)
         {
             if (_prepared)
+            {
+                if (_compact)
+                    return _preparedCompactNodePixels.TryGetValue(node.id, out var compactPrepared)
+                        ? compactPrepared[pixel] : Color.black;
                 return _preparedNodePixels.TryGetValue(node.id, out var prepared) ? prepared[pixel] : Color.black;
+            }
             Texture2D texture = _sources.Resolve(node);
             if (texture == null) return Color.black;
+            if (_compact)
+            {
+                if (!_compactPixels.TryGetValue(texture, out var compactColors))
+                {
+                    compactColors = ReadLinearCompact(texture, _width, _height, _uvRect);
+                    _compactPixels.Add(texture, compactColors);
+                }
+                return compactColors[pixel];
+            }
             if (!_pixels.TryGetValue(texture, out var colors))
             {
                 colors = ReadLinear(texture, _width, _height, _uvRect);
@@ -51,9 +70,20 @@ namespace TexturePackEditor
         {
             foreach (TexturePackNode node in nodes)
             {
-                if (node.type != TexturePackNodeType.Sample || _preparedNodePixels.ContainsKey(node.id)) continue;
+                if (node.type != TexturePackNodeType.Sample || _preparedNodePixels.ContainsKey(node.id) ||
+                    _preparedCompactNodePixels.ContainsKey(node.id)) continue;
                 Texture2D texture = _sources.Resolve(node);
                 if (texture == null) continue;
+                if (_compact)
+                {
+                    if (!_compactPixels.TryGetValue(texture, out var compactColors))
+                    {
+                        compactColors = ReadLinearCompact(texture, _width, _height, _uvRect);
+                        _compactPixels.Add(texture, compactColors);
+                    }
+                    _preparedCompactNodePixels[node.id] = compactColors;
+                    continue;
+                }
                 if (!_pixels.TryGetValue(texture, out var colors))
                 {
                     colors = ReadLinear(texture, _width, _height, _uvRect);
@@ -68,6 +98,8 @@ namespace TexturePackEditor
         {
             _pixels.Clear();
             _preparedNodePixels.Clear();
+            _compactPixels.Clear();
+            _preparedCompactNodePixels.Clear();
         }
 
         private static Color[] ReadLinear(Texture2D source, int width, int height, Rect uvRect)
@@ -84,6 +116,30 @@ namespace TexturePackEditor
                 readable.ReadPixels(new Rect(0, 0, width, height), 0, 0);
                 readable.Apply(false, false);
                 Color[] result = readable.GetPixels();
+                UnityEngine.Object.DestroyImmediate(readable);
+                return result;
+            }
+            finally
+            {
+                RenderTexture.active = previous;
+                RenderTexture.ReleaseTemporary(temporary);
+            }
+        }
+
+        private static Color32[] ReadLinearCompact(Texture2D source, int width, int height, Rect uvRect)
+        {
+            RenderTexture temporary = RenderTexture.GetTemporary(width, height, 0,
+                RenderTextureFormat.ARGB32, RenderTextureReadWrite.Linear);
+            var previous = RenderTexture.active;
+            try
+            {
+                Graphics.Blit(source, temporary, new Vector2(uvRect.width, uvRect.height),
+                    new Vector2(uvRect.x, uvRect.y));
+                RenderTexture.active = temporary;
+                var readable = new Texture2D(width, height, TextureFormat.RGBA32, false, true);
+                readable.ReadPixels(new Rect(0, 0, width, height), 0, 0);
+                readable.Apply(false, false);
+                Color32[] result = readable.GetPixels32();
                 UnityEngine.Object.DestroyImmediate(readable);
                 return result;
             }

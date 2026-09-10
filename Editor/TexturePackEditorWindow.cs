@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
@@ -46,7 +47,6 @@ namespace TexturePackEditor
         private readonly Dictionary<string, Color32[]> _nodePreviewPixels = new();
         private readonly Dictionary<string, float[]> _histograms = new();
         private readonly ConcurrentQueue<TexturePackPreviewUpdate> _previewUpdates = new();
-        private Texture2D _outputPreview;
         private Texture2D _largePreview;
         private Color32[] _lastOutputPixels;
         private Vector2 _sourceScroll;
@@ -59,7 +59,8 @@ namespace TexturePackEditor
         private int _previewDirtyChannels = 15;
         private double _previewDue;
         private int _previewRevision;
-        private Task<TexturePackPreviewResult> _previewTask;
+        private Task _previewTask;
+        private CancellationTokenSource _previewCancellation;
         private TexturePackPixelSession _previewSession;
         private string _previewError;
         private string _sliderKey;
@@ -108,14 +109,24 @@ namespace TexturePackEditor
         {
             Selection.selectionChanged -= OnProjectSelectionChanged;
             EditorApplication.update -= PreviewUpdate;
+            _previewCancellation?.Cancel();
             DestroyPreviews();
+            ClearPreviewUpdates();
             if (_previewTask == null) _previewSession?.Dispose();
             else
             {
                 TexturePackPixelSession session = _previewSession;
-                _previewTask.ContinueWith(_ => session?.Dispose());
+                ConcurrentQueue<TexturePackPreviewUpdate> updates = _previewUpdates;
+                _previewTask.ContinueWith(completedTask =>
+                {
+                    session?.Dispose();
+                    while (updates.TryDequeue(out TexturePackPreviewUpdate ignored)) { }
+                });
             }
             _previewSession = null;
+            _previewCancellation?.Dispose();
+            _previewCancellation = null;
+            ReleaseStaticTextures();
             if (recipe != null && recipe != _transientRecipe) AssetDatabase.SaveAssetIfDirty(recipe);
             if (_transientRecipe != null) DestroyImmediate(_transientRecipe);
         }
@@ -343,11 +354,23 @@ namespace TexturePackEditor
             return result;
         }
 
-        private static Color32[] OpaquePixels(Color32[] source)
+        private static Color32[] DownsampleOpaque(Color32[] source, int sourceWidth, int sourceHeight,
+            int maximumSize, out int width, out int height)
         {
-            var result = new Color32[source.Length];
-            for (int index = 0; index < source.Length; index++)
-                result[index] = new Color32(source[index].r, source[index].g, source[index].b, 255);
+            float scale = Mathf.Min(1, maximumSize / (float)Mathf.Max(sourceWidth, sourceHeight));
+            width = Mathf.Max(1, Mathf.RoundToInt(sourceWidth * scale));
+            height = Mathf.Max(1, Mathf.RoundToInt(sourceHeight * scale));
+            var result = new Color32[width * height];
+            for (int y = 0; y < height; y++)
+            {
+                int sourceY = Mathf.Min(sourceHeight - 1, (int)((y + .5f) * sourceHeight / height));
+                for (int x = 0; x < width; x++)
+                {
+                    int sourceX = Mathf.Min(sourceWidth - 1, (int)((x + .5f) * sourceWidth / width));
+                    Color32 pixel = source[sourceY * sourceWidth + sourceX];
+                    result[y * width + x] = new Color32(pixel.r, pixel.g, pixel.b, 255);
+                }
+            }
             return result;
         }
 
@@ -993,6 +1016,7 @@ namespace TexturePackEditor
             _previewDirty = true;
             _previewDirtyChannels |= channelMask & 15;
             _previewRevision++;
+            _previewCancellation?.Cancel();
             _previewDue = EditorApplication.timeSinceStartup + PreviewDebounce;
             Repaint();
         }
@@ -1010,17 +1034,18 @@ namespace TexturePackEditor
 
             if (_previewTask != null && _previewTask.IsCompleted)
             {
-                TexturePackPreviewResult result = null;
                 try
                 {
-                    if (_previewTask.IsFaulted) _previewError = _previewTask.Exception?.GetBaseException().Message;
-                    else result = _previewTask.Result;
+                    if (_previewTask.IsFaulted)
+                        _previewError = _previewTask.Exception?.GetBaseException().Message;
                 }
                 finally
                 {
                     _previewSession?.Dispose();
                     _previewSession = null;
                     _previewTask = null;
+                    _previewCancellation?.Dispose();
+                    _previewCancellation = null;
                 }
                 // Progressive updates already applied each node and the packed output as they became ready.
                 Repaint();
@@ -1038,10 +1063,11 @@ namespace TexturePackEditor
             {
                 _sourceSet = TexturePackSourceSet.Detect(anchor);
                 TexturePackOutput snapshot = ActiveOutput.Clone(true);
+                PrunePreviewCaches(snapshot);
                 int channelMask = _previewDirtyChannels == 0 ? 15 : _previewDirtyChannels;
                 _previewDirtyChannels = 0;
                 _previewSession = new TexturePackPixelSession(_sourceSet, previewResolution, previewResolution,
-                    PreviewUvRect());
+                    PreviewUvRect(), compact: true);
                 _previewSession.Prepare(snapshot.channels.Where((stack, channel) =>
                     (channelMask & (1 << channel)) != 0).SelectMany(stack => stack.nodes));
                 int revision = _previewRevision;
@@ -1050,9 +1076,16 @@ namespace TexturePackEditor
                     (Color32[])_lastOutputPixels.Clone();
                 int priorityChannel = _lastSelectedChannel >= 0 ? _lastSelectedChannel : _activeChannel;
                 string priorityNode = _lastSelectedId;
-                _previewTask = Task.Run(() => TexturePackPreviewWork.Compute(revision, snapshot, session,
-                    channelMask, previousOutput, priorityChannel, priorityNode,
-                    update => _previewUpdates.Enqueue(update)));
+                _previewCancellation = new CancellationTokenSource();
+                CancellationToken cancellation = _previewCancellation.Token;
+                _previewTask = Task.Run(() =>
+                {
+                    TexturePackPreviewWork.Compute(revision, snapshot, session,
+                        channelMask, previousOutput, priorityChannel, priorityNode,
+                        update => _previewUpdates.Enqueue(update), thumbnailSize: 96,
+                        retainNodeResults: false, takeOwnershipPreviousOutput: true,
+                        cancellationToken: cancellation);
+                }, cancellation);
             }
             catch (Exception exception)
             {
@@ -1066,18 +1099,17 @@ namespace TexturePackEditor
         {
             if (update.isOutput)
             {
-                if (_outputPreview != null) DestroyImmediate(_outputPreview);
-                _outputPreview = CreatePreviewTexture(update.width, update.height, update.pixels);
-                _lastOutputPixels = (Color32[])update.pixels.Clone();
+                _lastOutputPixels = update.pixels;
                 if (!showSelectedNode) RebuildLargePreview();
             }
             else
             {
                 if (_nodePreviews.TryGetValue(update.nodeId, out Texture2D previous) && previous != null)
                     DestroyImmediate(previous);
-                _nodePreviewPixels[update.nodeId] = (Color32[])update.pixels.Clone();
-                _nodePreviews[update.nodeId] = CreatePreviewTexture(update.width, update.height,
-                    OpaquePixels(update.pixels));
+                _nodePreviewPixels[update.nodeId] = update.pixels;
+                Color32[] thumbnail = DownsampleOpaque(update.pixels, update.width, update.height, 96,
+                    out int thumbnailWidth, out int thumbnailHeight);
+                _nodePreviews[update.nodeId] = CreatePreviewTexture(thumbnailWidth, thumbnailHeight, thumbnail);
                 if (update.histogram != null)
                 {
                     _histograms[update.nodeId] = update.histogram;
@@ -1087,10 +1119,24 @@ namespace TexturePackEditor
             Repaint();
         }
 
+        private void PrunePreviewCaches(TexturePackOutput output)
+        {
+            var valid = new HashSet<string>(output.channels.SelectMany(stack => stack.nodes).Select(node => node.id));
+            foreach (string id in _nodePreviews.Keys.Where(id => !valid.Contains(id)).ToArray())
+            {
+                if (_nodePreviews[id] != null) DestroyImmediate(_nodePreviews[id]);
+                _nodePreviews.Remove(id);
+            }
+            foreach (string id in _nodePreviewPixels.Keys.Where(id => !valid.Contains(id)).ToArray())
+                _nodePreviewPixels.Remove(id);
+            foreach (string id in _histograms.Keys.Where(id => !valid.Contains(id)).ToArray())
+                _histograms.Remove(id);
+        }
+
         private static Texture2D CreatePreviewTexture(int width, int height, Color32[] pixels)
         {
             var texture = new Texture2D(width, height, TextureFormat.RGBA32, false, true)
-            { hideFlags = HideFlags.HideAndDontSave };
+            { name = "TexturePackEditor Preview", hideFlags = HideFlags.HideAndDontSave };
             texture.SetPixels32(pixels);
             texture.Apply(false, true);
             return texture;
@@ -1102,11 +1148,26 @@ namespace TexturePackEditor
             _nodePreviews.Clear();
             _nodePreviewPixels.Clear();
             _histograms.Clear();
-            if (_outputPreview != null) DestroyImmediate(_outputPreview);
-            _outputPreview = null;
             if (_largePreview != null) DestroyImmediate(_largePreview);
             _largePreview = null;
             _lastOutputPixels = null;
+        }
+
+        private void ClearPreviewUpdates()
+        {
+            while (_previewUpdates.TryDequeue(out _)) { }
+        }
+
+        private static void ReleaseStaticTextures()
+        {
+            foreach (Texture2D texture in GradientTextures.Values)
+                if (texture != null) DestroyImmediate(texture);
+            GradientTextures.Clear();
+            foreach (GUIStyle style in NodeHeaderStyles.Values)
+                if (style?.normal.background != null) DestroyImmediate(style.normal.background);
+            NodeHeaderStyles.Clear();
+            _nodeContainerStyle = null;
+            _nodeBodyStyle = null;
         }
 
         private float DrawColoredSlider(string label, float value, Color color, string key)
@@ -1263,7 +1324,8 @@ namespace TexturePackEditor
             var pixels = new Color32[width];
             for (int x = 0; x < width; x++) pixels[x] = Color.Lerp(left, right, x / (width - 1f));
             var texture = new Texture2D(width, 1, TextureFormat.RGBA32, false, true)
-            { hideFlags = HideFlags.HideAndDontSave, filterMode = FilterMode.Bilinear, wrapMode = TextureWrapMode.Clamp };
+            { name = "TexturePackEditor Gradient", hideFlags = HideFlags.HideAndDontSave,
+                filterMode = FilterMode.Bilinear, wrapMode = TextureWrapMode.Clamp };
             texture.SetPixels32(pixels);
             texture.Apply(false, true);
             GradientTextures[key] = texture;
@@ -1315,7 +1377,8 @@ namespace TexturePackEditor
                 pixels[y * size + x] = pixel;
             }
             var texture = new Texture2D(size, size, TextureFormat.RGBA32, false, true)
-            { hideFlags = HideFlags.HideAndDontSave, filterMode = FilterMode.Bilinear, wrapMode = TextureWrapMode.Clamp };
+            { name = "TexturePackEditor Chrome", hideFlags = HideFlags.HideAndDontSave,
+                filterMode = FilterMode.Bilinear, wrapMode = TextureWrapMode.Clamp };
             texture.SetPixels32(pixels);
             texture.Apply(false, true);
             return texture;

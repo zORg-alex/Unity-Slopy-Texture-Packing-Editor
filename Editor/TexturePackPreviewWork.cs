@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using UnityEngine;
 
 namespace TexturePackEditor
@@ -32,7 +33,9 @@ namespace TexturePackEditor
         public static TexturePackPreviewResult Compute(int revision, TexturePackOutput output,
             TexturePackPixelSession session, int channelMask = 15, Color32[] previousOutput = null,
             int priorityChannel = -1, string priorityNodeId = null,
-            Action<TexturePackPreviewUpdate> publish = null)
+            Action<TexturePackPreviewUpdate> publish = null, int thumbnailSize = 96,
+            bool retainNodeResults = true, bool takeOwnershipPreviousOutput = false,
+            CancellationToken cancellationToken = default)
         {
             var result = new TexturePackPreviewResult
             {
@@ -40,70 +43,92 @@ namespace TexturePackEditor
                 width = session.Width,
                 height = session.Height,
                 outputPixels = previousOutput != null && previousOutput.Length == session.Width * session.Height
-                    ? (Color32[])previousOutput.Clone()
+                    ? takeOwnershipPreviousOutput ? previousOutput : (Color32[])previousOutput.Clone()
                     : new Color32[session.Width * session.Height]
             };
             int pixelCount = result.outputPixels.Length;
-            var finalChannels = new float[4][];
             int[] channelOrder = Enumerable.Range(0, 4)
                 .Where(channel => (channelMask & (1 << channel)) != 0)
                 .OrderBy(channel => channel == priorityChannel ? 0 : 1).ToArray();
 
             foreach (int channel in channelOrder)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 TexturePackChannelStack stack = output.channels[channel];
                 var values = new Color[pixelCount];
                 var scalar = new bool[pixelCount];
                 Array.Fill(scalar, true);
                 var deferred = new List<TexturePackPreviewUpdate>();
+                bool prioritizeNode = !string.IsNullOrEmpty(priorityNodeId) &&
+                                      stack.nodes.Any(node => node.id == priorityNodeId);
                 for (int nodeIndex = 0; nodeIndex < stack.nodes.Count; nodeIndex++)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     TexturePackNode node = stack.nodes[nodeIndex];
-                    var preview = new Color32[pixelCount];
                     int[] histogram = node.type == TexturePackNodeType.Levels ? new int[256] : null;
                     for (int pixel = 0; pixel < pixelCount; pixel++)
                     {
+                        if ((pixel & 4095) == 0) cancellationToken.ThrowIfCancellationRequested();
                         if (histogram != null) histogram[ToByte(values[pixel].r)]++;
                         values[pixel] = TexturePackProcessor.ApplyNode(node, values[pixel], scalar[pixel],
                             session, pixel, out scalar[pixel]);
-                        preview[pixel] = PreviewColor(values[pixel], scalar[pixel]);
                     }
-                    result.nodePixels[node.id] = preview;
+                    int nodePreviewSize = node.id == priorityNodeId ? session.Width :
+                        Mathf.Min(thumbnailSize, session.Width);
+                    Color32[] preview = CreatePreview(values, scalar, session.Width, session.Height,
+                        nodePreviewSize, nodePreviewSize);
+                    if (retainNodeResults) result.nodePixels[node.id] = preview;
                     float[] normalizedHistogram = histogram == null ? null : NormalizeHistogram(histogram);
-                    if (normalizedHistogram != null) result.histograms[node.id] = normalizedHistogram;
+                    if (retainNodeResults && normalizedHistogram != null)
+                        result.histograms[node.id] = normalizedHistogram;
                     var update = new TexturePackPreviewUpdate
                     {
-                        revision = revision, width = result.width, height = result.height,
+                        revision = revision, width = nodePreviewSize, height = nodePreviewSize,
                         nodeId = node.id, pixels = preview, histogram = normalizedHistogram
                     };
                     if (node.id == priorityNodeId) publish?.Invoke(update);
-                    else if (!string.IsNullOrEmpty(priorityNodeId) && channel == priorityChannel) deferred.Add(update);
+                    else if (prioritizeNode && channel == priorityChannel) deferred.Add(update);
                     else publish?.Invoke(update);
                 }
                 foreach (TexturePackPreviewUpdate update in deferred) publish?.Invoke(update);
-                finalChannels[channel] = values.Select(value => Mathf.Clamp01(value.r)).ToArray();
-            }
-
-            foreach (int channel in channelOrder)
-            for (int pixel = 0; pixel < pixelCount; pixel++)
-            {
-                Color32 packed = result.outputPixels[pixel];
-                byte value = ToByte(finalChannels[channel][pixel]);
-                switch (channel)
+                for (int pixel = 0; pixel < pixelCount; pixel++)
                 {
-                    case 0: packed.r = value; break;
-                    case 1: packed.g = value; break;
-                    case 2: packed.b = value; break;
-                    case 3: packed.a = value; break;
+                    Color32 packed = result.outputPixels[pixel];
+                    byte value = ToByte(values[pixel].r);
+                    switch (channel)
+                    {
+                        case 0: packed.r = value; break;
+                        case 1: packed.g = value; break;
+                        case 2: packed.b = value; break;
+                        case 3: packed.a = value; break;
+                    }
+                    result.outputPixels[pixel] = packed;
                 }
-                result.outputPixels[pixel] = packed;
             }
+            cancellationToken.ThrowIfCancellationRequested();
             publish?.Invoke(new TexturePackPreviewUpdate
             {
                 revision = revision, width = result.width, height = result.height,
                 pixels = result.outputPixels, isOutput = true
             });
             return result;
+        }
+
+        private static Color32[] CreatePreview(Color[] values, bool[] scalar, int sourceWidth,
+            int sourceHeight, int width, int height)
+        {
+            var preview = new Color32[width * height];
+            for (int y = 0; y < height; y++)
+            {
+                int sourceY = Mathf.Min(sourceHeight - 1, (int)((y + .5f) * sourceHeight / height));
+                for (int x = 0; x < width; x++)
+                {
+                    int sourceX = Mathf.Min(sourceWidth - 1, (int)((x + .5f) * sourceWidth / width));
+                    int source = sourceY * sourceWidth + sourceX;
+                    preview[y * width + x] = PreviewColor(values[source], scalar[source]);
+                }
+            }
+            return preview;
         }
 
         private static Color32 PreviewColor(Color color, bool scalar)
