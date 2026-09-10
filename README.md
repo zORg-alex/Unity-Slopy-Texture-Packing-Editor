@@ -4,10 +4,17 @@ Open `Tools > Texture Pack Editor`, then select an anchor texture. Textures in t
 filenames share the anchor's prefix are exposed as detected sampler sources. Additional textures can be
 added manually.
 
-Create a recipe asset before generating. Each output R/G/B/A channel is an independent, ordered stack.
-Drag sampler cards or toolbar actions into a stack; drag nodes or selected node groups to reorder them.
+The window uses three columns: texture sources and generation settings, tabbed outputs with compact R/G/B/A
+stacks, and a tool shelf. Create a recipe asset before generating. Each output channel is an independent,
+ordered stack. Drag sampler cards or tool cards onto an expanded stack, between nodes, or directly onto a
+collapsed channel header; dropping on a header opens it. Drag nodes or selected node groups to reorder them.
 Shift-click selects a range, Ctrl/Cmd-click toggles selection, Ctrl/Cmd-C and Ctrl/Cmd-V copy and paste,
 and Delete removes selected nodes. Node settings and the preview beside each node can be collapsed.
+
+Use the `+` output tab to create an output based on any detected map or a custom output. An optional file
+name can be set per output; otherwise generation keeps the base texture's file name. Preview pixels and
+Levels histograms are processed by one background job at a time after a short edit debounce. Unity texture
+capture and preview texture creation remain on the Editor thread.
 
 The output-base role supplies output resolution and Unity importer settings. Generation writes a lossless
 RGBA TGA next to that texture using the persistent safe suffix. Source assets are never overwritten.
@@ -18,4 +25,6 @@ Recipes store detected sources by filename role (the part after the shared prefi
 to be applied to another similarly named texture set. Manual sources remain direct asset references.
 
 Desaturate defaults to linear Rec.709 luminance: R 0.2126, G 0.7152, B 0.0722. Green contributes most to
-perceived brightness, followed by red and then blue. The weights are editable and normalized by default.
+perceived brightness, followed by red and then blue. Its colored weight rails, amount, and two-point output
+range are editable. Levels displays the incoming channel histogram with colliding black, midpoint, and white
+input handles plus a grayscale two-point output control.

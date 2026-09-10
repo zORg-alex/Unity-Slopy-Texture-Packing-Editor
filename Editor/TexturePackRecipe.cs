@@ -23,6 +23,9 @@ namespace TexturePackEditor
         public Texture2D manualTexture;
         public int channelMask = 1;
 
+        public float desaturateAmount = 1;
+        public float desaturateBlack;
+        public float desaturateWhite = 1;
         public float luminanceRed = 0.2126f;
         public float luminanceGreen = 0.7152f;
         public float luminanceBlue = 0.0722f;
@@ -43,13 +46,15 @@ namespace TexturePackEditor
         public float add;
         public float constant;
 
-        public TexturePackNode Clone()
+        public TexturePackNode Clone(bool preserveId = false)
         {
             return new TexturePackNode
             {
+                id = preserveId ? id : Guid.NewGuid().ToString("N"),
                 type = type, expanded = expanded, sourceKind = sourceKind, sourceRole = sourceRole,
                 manualTexture = manualTexture, channelMask = channelMask,
-                luminanceRed = luminanceRed, luminanceGreen = luminanceGreen,
+                desaturateAmount = desaturateAmount, desaturateBlack = desaturateBlack,
+                desaturateWhite = desaturateWhite, luminanceRed = luminanceRed, luminanceGreen = luminanceGreen,
                 luminanceBlue = luminanceBlue, normalizeLuminance = normalizeLuminance,
                 inputBlack = inputBlack, inputWhite = inputWhite, gamma = gamma,
                 outputBlack = outputBlack, outputWhite = outputWhite,
@@ -67,13 +72,18 @@ namespace TexturePackEditor
     [Serializable]
     public sealed class TexturePackChannelStack
     {
+        public bool expanded;
         public List<TexturePackNode> nodes = new();
     }
 
-    public sealed class TexturePackRecipe : ScriptableObject
+    [Serializable]
+    public sealed class TexturePackOutput
     {
+        public string id = Guid.NewGuid().ToString("N");
+        public string name;
         public string outputBaseRole;
-        public List<Texture2D> manualSources = new();
+        [Tooltip("Optional file name without an extension. Empty uses the base texture name.")]
+        public string outputFileName;
         public List<TexturePackChannelStack> channels = new();
         [HideInInspector] public string lastGeneratedPath;
 
@@ -84,33 +94,91 @@ namespace TexturePackEditor
             foreach (var channel in channels) channel.nodes ??= new List<TexturePackNode>();
         }
 
-        public void ResetTo(TexturePackSourceSet sourceSet)
+        public static TexturePackOutput Create(TexturePackSourceSet sourceSet, string role, string displayName = null)
         {
-            EnsureChannels();
-            outputBaseRole = sourceSet.AnchorRole;
-            for (int channel = 0; channel < 4; channel++)
+            var output = new TexturePackOutput
             {
-                channels[channel].nodes.Clear();
-                channels[channel].nodes.Add(new TexturePackNode
+                name = string.IsNullOrWhiteSpace(displayName) ? role : displayName,
+                outputBaseRole = role
+            };
+            output.EnsureChannels();
+            for (int channel = 0; channel < 4; channel++)
+                output.channels[channel].nodes.Add(new TexturePackNode
                 {
                     type = TexturePackNodeType.Sample,
                     sourceKind = TexturePackSourceKind.DetectedRole,
-                    sourceRole = sourceSet.AnchorRole,
+                    sourceRole = role ?? sourceSet?.AnchorRole,
                     channelMask = 1 << channel
                 });
+            return output;
+        }
+
+        public TexturePackOutput Clone(bool preserveIds = false)
+        {
+            return new TexturePackOutput
+            {
+                id = preserveIds ? id : Guid.NewGuid().ToString("N"),
+                name = name,
+                outputBaseRole = outputBaseRole,
+                outputFileName = outputFileName,
+                channels = channels.Select(stack => new TexturePackChannelStack
+                {
+                    expanded = stack.expanded,
+                    nodes = stack.nodes.Select(node => node.Clone(preserveIds)).ToList()
+                }).ToList()
+            };
+        }
+    }
+
+    public sealed class TexturePackRecipe : ScriptableObject
+    {
+        public List<TexturePackOutput> outputs = new();
+        public string outputBaseRole;
+        public List<Texture2D> manualSources = new();
+        public List<TexturePackChannelStack> channels = new();
+        [HideInInspector] public string lastGeneratedPath;
+
+        public void EnsureChannels()
+        {
+            EnsureOutputs();
+        }
+
+        public void EnsureOutputs()
+        {
+            outputs ??= new List<TexturePackOutput>();
+            channels ??= new List<TexturePackChannelStack>();
+            manualSources ??= new List<Texture2D>();
+            if (outputs.Count == 0)
+            {
+                var migrated = new TexturePackOutput
+                {
+                    name = string.IsNullOrEmpty(outputBaseRole) ? "Output" : outputBaseRole,
+                    outputBaseRole = outputBaseRole,
+                    channels = channels ?? new List<TexturePackChannelStack>(),
+                    lastGeneratedPath = lastGeneratedPath
+                };
+                outputs.Add(migrated);
             }
+            foreach (var output in outputs) output.EnsureChannels();
+            // Keep the original fields synchronized for recipes created by the first version.
+            outputBaseRole = outputs[0].outputBaseRole;
+            channels = outputs[0].channels;
+            lastGeneratedPath = outputs[0].lastGeneratedPath;
+        }
+
+        public void ResetTo(TexturePackSourceSet sourceSet)
+        {
+            outputs.Clear();
+            outputs.Add(TexturePackOutput.Create(sourceSet, sourceSet.AnchorRole));
+            EnsureOutputs();
         }
 
         public void CopyFrom(TexturePackRecipe source)
         {
-            outputBaseRole = source.outputBaseRole;
+            source.EnsureOutputs();
+            outputs = source.outputs.Select(output => output.Clone()).ToList();
             manualSources = new List<Texture2D>(source.manualSources);
-            channels = source.channels.Select(stack => new TexturePackChannelStack
-            {
-                nodes = stack.nodes.Select(node => node.Clone()).ToList()
-            }).ToList();
-            lastGeneratedPath = null;
-            EnsureChannels();
+            EnsureOutputs();
         }
     }
 

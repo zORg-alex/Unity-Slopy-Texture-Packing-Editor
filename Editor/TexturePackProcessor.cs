@@ -12,6 +12,8 @@ namespace TexturePackEditor
         private readonly int _width;
         private readonly int _height;
         private readonly Dictionary<Texture2D, Color[]> _pixels = new();
+        private readonly Dictionary<string, Color[]> _preparedNodePixels = new();
+        private bool _prepared;
 
         public int Width => _width;
         public int Height => _height;
@@ -25,6 +27,8 @@ namespace TexturePackEditor
 
         public Color Sample(TexturePackNode node, int pixel)
         {
+            if (_prepared)
+                return _preparedNodePixels.TryGetValue(node.id, out var prepared) ? prepared[pixel] : Color.black;
             Texture2D texture = _sources.Resolve(node);
             if (texture == null) return Color.black;
             if (!_pixels.TryGetValue(texture, out var colors))
@@ -35,7 +39,29 @@ namespace TexturePackEditor
             return colors[pixel];
         }
 
-        public void Dispose() => _pixels.Clear();
+        /// <summary>Captures Unity textures on the main thread, after which evaluation is thread-safe.</summary>
+        public void Prepare(IEnumerable<TexturePackNode> nodes)
+        {
+            foreach (TexturePackNode node in nodes)
+            {
+                if (node.type != TexturePackNodeType.Sample || _preparedNodePixels.ContainsKey(node.id)) continue;
+                Texture2D texture = _sources.Resolve(node);
+                if (texture == null) continue;
+                if (!_pixels.TryGetValue(texture, out var colors))
+                {
+                    colors = ReadLinear(texture, _width, _height);
+                    _pixels.Add(texture, colors);
+                }
+                _preparedNodePixels[node.id] = colors;
+            }
+            _prepared = true;
+        }
+
+        public void Dispose()
+        {
+            _pixels.Clear();
+            _preparedNodePixels.Clear();
+        }
 
         private static Color[] ReadLinear(Texture2D source, int width, int height)
         {
@@ -101,8 +127,10 @@ namespace TexturePackEditor
                             : 1;
                         float luminance = (value.r * node.luminanceRed + value.g * node.luminanceGreen +
                                            value.b * node.luminanceBlue) / weight;
-                        value = new Color(luminance, luminance, luminance, luminance);
-                        scalar = true;
+                        luminance = Mathf.Lerp(node.desaturateBlack, node.desaturateWhite, luminance);
+                        Color gray = new(luminance, luminance, luminance, luminance);
+                        value = Color.Lerp(value, gray, node.desaturateAmount);
+                        scalar = node.desaturateAmount >= 0.999f;
                         break;
                     }
                     case TexturePackNodeType.Levels:
@@ -153,19 +181,19 @@ namespace TexturePackEditor
             return preview;
         }
 
-        public static Texture2D CreateOutputPreview(TexturePackRecipe recipe, TexturePackPixelSession session)
+        public static Texture2D CreateOutputPreview(TexturePackOutput output, TexturePackPixelSession session)
         {
             var preview = new Texture2D(session.Width, session.Height, TextureFormat.RGBA32, false, true)
             { hideFlags = HideFlags.HideAndDontSave };
             var pixels = new Color32[session.Width * session.Height];
             for (int i = 0; i < pixels.Length; i++)
-                pixels[i] = EvaluatePixel(recipe, session, i, false);
+                pixels[i] = EvaluatePixel(output, session, i, false);
             preview.SetPixels32(pixels);
             preview.Apply(false, true);
             return preview;
         }
 
-        public static string Bake(TexturePackRecipe recipe, Texture2D anchor, string suffix)
+        public static string Bake(TexturePackRecipe recipe, int outputIndex, Texture2D anchor, string suffix)
         {
             if (recipe == null || anchor == null) throw new ArgumentNullException();
             string recipePath = AssetDatabase.GetAssetPath(recipe);
@@ -173,15 +201,21 @@ namespace TexturePackEditor
             suffix = SanitizeSuffix(suffix);
             if (string.IsNullOrEmpty(suffix)) throw new InvalidOperationException("Safe output suffix cannot be empty.");
 
-            recipe.EnsureChannels();
+            recipe.EnsureOutputs();
+            if (outputIndex < 0 || outputIndex >= recipe.outputs.Count)
+                throw new ArgumentOutOfRangeException(nameof(outputIndex));
+            TexturePackOutput output = recipe.outputs[outputIndex];
             TexturePackSourceSet sources = TexturePackSourceSet.Detect(anchor);
-            Texture2D outputBase = sources.ResolveRole(recipe.outputBaseRole);
-            if (outputBase == null) throw new InvalidOperationException("Output-base role is unresolved: " + recipe.outputBaseRole);
+            Texture2D outputBase = sources.ResolveRole(output.outputBaseRole);
+            if (outputBase == null) throw new InvalidOperationException("Output-base role is unresolved: " + output.outputBaseRole);
             string basePath = AssetDatabase.GetAssetPath(outputBase);
+            string baseName = string.IsNullOrWhiteSpace(output.outputFileName)
+                ? Path.GetFileNameWithoutExtension(basePath)
+                : SanitizeFileName(output.outputFileName);
             string candidate = Path.Combine(Path.GetDirectoryName(basePath) ?? "Assets",
-                    Path.GetFileNameWithoutExtension(basePath) + suffix + ".tga").Replace('\\', '/');
+                    baseName + suffix + ".tga").Replace('\\', '/');
             string recipeGuid = AssetDatabase.AssetPathToGUID(recipePath);
-            string outputPath = ResolveSafeOutputPath(candidate, recipe.lastGeneratedPath, recipeGuid);
+            string outputPath = ResolveSafeOutputPath(candidate, output.lastGeneratedPath, recipeGuid);
             var outputImporter = AssetImporter.GetAtPath(basePath) as TextureImporter;
             bool outputSrgb = outputImporter != null && outputImporter.sRGBTexture;
             int width = outputBase.width;
@@ -190,7 +224,7 @@ namespace TexturePackEditor
             using (var session = new TexturePackPixelSession(sources, width, height))
             {
                 var pixels = new Color32[width * height];
-                for (int i = 0; i < pixels.Length; i++) pixels[i] = EvaluatePixel(recipe, session, i, outputSrgb);
+                for (int i = 0; i < pixels.Length; i++) pixels[i] = EvaluatePixel(output, session, i, outputSrgb);
                 var texture = new Texture2D(width, height, TextureFormat.RGBA32, false, true);
                 texture.SetPixels32(pixels);
                 texture.Apply(false, false);
@@ -200,19 +234,20 @@ namespace TexturePackEditor
 
             AssetDatabase.ImportAsset(outputPath, ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
             ConfigureImporter(outputPath, outputImporter, recipeGuid);
-            recipe.lastGeneratedPath = outputPath;
+            output.lastGeneratedPath = outputPath;
+            recipe.EnsureOutputs();
             EditorUtility.SetDirty(recipe);
             AssetDatabase.SaveAssetIfDirty(recipe);
             return outputPath;
         }
 
-        private static Color32 EvaluatePixel(TexturePackRecipe recipe, TexturePackPixelSession session, int pixel,
+        public static Color32 EvaluatePixel(TexturePackOutput output, TexturePackPixelSession session, int pixel,
             bool encodeSrgb)
         {
-            float r = Evaluate(recipe.channels[0].nodes, recipe.channels[0].nodes.Count - 1, session, pixel);
-            float g = Evaluate(recipe.channels[1].nodes, recipe.channels[1].nodes.Count - 1, session, pixel);
-            float b = Evaluate(recipe.channels[2].nodes, recipe.channels[2].nodes.Count - 1, session, pixel);
-            float a = Evaluate(recipe.channels[3].nodes, recipe.channels[3].nodes.Count - 1, session, pixel);
+            float r = Evaluate(output.channels[0].nodes, output.channels[0].nodes.Count - 1, session, pixel);
+            float g = Evaluate(output.channels[1].nodes, output.channels[1].nodes.Count - 1, session, pixel);
+            float b = Evaluate(output.channels[2].nodes, output.channels[2].nodes.Count - 1, session, pixel);
+            float a = Evaluate(output.channels[3].nodes, output.channels[3].nodes.Count - 1, session, pixel);
             if (encodeSrgb)
             {
                 r = Mathf.LinearToGammaSpace(r);
@@ -256,6 +291,13 @@ namespace TexturePackEditor
         {
             foreach (char invalid in Path.GetInvalidFileNameChars()) suffix = suffix.Replace(invalid.ToString(), "");
             return suffix.Trim();
+        }
+
+        private static string SanitizeFileName(string value)
+        {
+            foreach (char invalid in Path.GetInvalidFileNameChars()) value = value.Replace(invalid, '_');
+            value = value.Trim();
+            return string.IsNullOrEmpty(value) ? "PackedTexture" : value;
         }
 
         private static bool IsSingleBit(int value) => value != 0 && (value & (value - 1)) == 0;
