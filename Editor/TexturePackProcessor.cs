@@ -98,71 +98,67 @@ namespace TexturePackEditor
             bool scalar = true;
             int end = Mathf.Min(lastNode, nodes.Count - 1);
             for (int index = 0; index <= end; index++)
+                value = ApplyNode(nodes[index], value, scalar, session, pixel, out scalar);
+            return Mathf.Clamp01(value.r);
+        }
+
+        public static Color ApplyNode(TexturePackNode node, Color value, bool scalar,
+            TexturePackPixelSession session, int pixel, out bool outputScalar)
+        {
+            outputScalar = scalar;
+            switch (node.type)
             {
-                TexturePackNode node = nodes[index];
-                switch (node.type)
+                case TexturePackNodeType.Sample:
                 {
-                    case TexturePackNodeType.Sample:
+                    Color sample = session.Sample(node, pixel);
+                    int mask = node.channelMask & 15;
+                    if (IsSingleBit(mask))
                     {
-                        Color sample = session.Sample(node, pixel);
-                        int mask = node.channelMask & 15;
-                        if (IsSingleBit(mask))
-                        {
-                            float component = mask switch { 1 => sample.r, 2 => sample.g, 4 => sample.b, _ => sample.a };
-                            value = new Color(component, component, component, component);
-                            scalar = true;
-                        }
-                        else
-                        {
-                            value = new Color((mask & 1) != 0 ? sample.r : 0, (mask & 2) != 0 ? sample.g : 0,
-                                (mask & 4) != 0 ? sample.b : 0, (mask & 8) != 0 ? sample.a : 0);
-                            scalar = false;
-                        }
-                        break;
+                        float component = mask switch { 1 => sample.r, 2 => sample.g, 4 => sample.b, _ => sample.a };
+                        outputScalar = true;
+                        return new Color(component, component, component, component);
                     }
-                    case TexturePackNodeType.Desaturate:
-                    {
-                        float weight = node.normalizeLuminance
-                            ? Mathf.Max(0.0001f, node.luminanceRed + node.luminanceGreen + node.luminanceBlue)
-                            : 1;
-                        float luminance = (value.r * node.luminanceRed + value.g * node.luminanceGreen +
-                                           value.b * node.luminanceBlue) / weight;
-                        luminance = Mathf.Lerp(node.desaturateBlack, node.desaturateWhite, luminance);
-                        Color gray = new(luminance, luminance, luminance, luminance);
-                        value = Color.Lerp(value, gray, node.desaturateAmount);
-                        scalar = node.desaturateAmount >= 0.999f;
-                        break;
-                    }
-                    case TexturePackNodeType.Levels:
-                        value = Map(value, component => Levels(component, node));
-                        break;
-                    case TexturePackNodeType.Noise:
-                    {
-                        int x = pixel % session.Width;
-                        int y = pixel / session.Width;
-                        float noise = FractalNoise((x + 0.5f) / session.Width,
-                            (y + 0.5f) / session.Height, node.noiseScale, node.noiseSeed);
-                        value = node.noiseMode switch
-                        {
-                            TexturePackNoiseMode.Multiply => value * Mathf.Lerp(1, noise * 2, node.noiseAmount),
-                            TexturePackNoiseMode.Blend => Color.Lerp(value, new Color(noise, noise, noise, noise), node.noiseAmount),
-                            _ => value + new Color(1, 1, 1, 1) * ((noise - 0.5f) * node.noiseAmount)
-                        };
-                        break;
-                    }
-                    case TexturePackNodeType.Invert:
-                        value = Color.white - value;
-                        break;
-                    case TexturePackNodeType.MultiplyAdd:
-                        value = value * node.multiply + new Color(node.add, node.add, node.add, node.add);
-                        break;
-                    case TexturePackNodeType.Constant:
-                        value = new Color(node.constant, node.constant, node.constant, node.constant);
-                        scalar = true;
-                        break;
+                    outputScalar = false;
+                    return new Color((mask & 1) != 0 ? sample.r : 0, (mask & 2) != 0 ? sample.g : 0,
+                        (mask & 4) != 0 ? sample.b : 0, (mask & 8) != 0 ? sample.a : 0);
                 }
+                case TexturePackNodeType.Desaturate:
+                {
+                    float weight = node.normalizeLuminance
+                        ? Mathf.Max(0.0001f, node.luminanceRed + node.luminanceGreen + node.luminanceBlue)
+                        : 1;
+                    float luminance = (value.r * node.luminanceRed + value.g * node.luminanceGreen +
+                                       value.b * node.luminanceBlue) / weight;
+                    luminance = Mathf.Lerp(node.desaturateBlack, node.desaturateWhite, luminance);
+                    Color gray = new(luminance, luminance, luminance, luminance);
+                    outputScalar = scalar || node.desaturateAmount >= 0.999f;
+                    return Color.Lerp(value, gray, node.desaturateAmount);
+                }
+                case TexturePackNodeType.Levels:
+                    return Map(value, component => Levels(component, node));
+                case TexturePackNodeType.Noise:
+                {
+                    int x = pixel % session.Width;
+                    int y = pixel / session.Width;
+                    float noise = FractalNoise((x + 0.5f) / session.Width,
+                        (y + 0.5f) / session.Height, node.noiseScale, node.noiseSeed);
+                    return node.noiseMode switch
+                    {
+                        TexturePackNoiseMode.Multiply => value * Mathf.Lerp(1, noise * 2, node.noiseAmount),
+                        TexturePackNoiseMode.Blend => Color.Lerp(value, new Color(noise, noise, noise, noise), node.noiseAmount),
+                        _ => value + Color.white * ((noise - 0.5f) * node.noiseAmount)
+                    };
+                }
+                case TexturePackNodeType.Invert:
+                    return Color.white - value;
+                case TexturePackNodeType.MultiplyAdd:
+                    return value * node.multiply + new Color(node.add, node.add, node.add, node.add);
+                case TexturePackNodeType.Constant:
+                    outputScalar = true;
+                    return new Color(node.constant, node.constant, node.constant, node.constant);
+                default:
+                    return value;
             }
-            return Mathf.Clamp01(scalar ? value.r : value.r);
         }
 
         public static Texture2D CreateChannelPreview(TexturePackChannelStack stack, int lastNode,

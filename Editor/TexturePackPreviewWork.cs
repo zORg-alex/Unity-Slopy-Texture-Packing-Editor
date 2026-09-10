@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
@@ -14,24 +15,47 @@ namespace TexturePackEditor
         public Color32[] outputPixels;
     }
 
+    public sealed class TexturePackPreviewUpdate
+    {
+        public int revision;
+        public int width;
+        public int height;
+        public string nodeId;
+        public Color32[] pixels;
+        public float[] histogram;
+        public bool isOutput;
+    }
+
     /// <summary>Pure CPU work. Texture capture and Texture2D creation stay on Unity's main thread.</summary>
     public static class TexturePackPreviewWork
     {
         public static TexturePackPreviewResult Compute(int revision, TexturePackOutput output,
-            TexturePackPixelSession session)
+            TexturePackPixelSession session, int channelMask = 15, Color32[] previousOutput = null,
+            int priorityChannel = -1, string priorityNodeId = null,
+            Action<TexturePackPreviewUpdate> publish = null)
         {
             var result = new TexturePackPreviewResult
             {
                 revision = revision,
                 width = session.Width,
                 height = session.Height,
-                outputPixels = new Color32[session.Width * session.Height]
+                outputPixels = previousOutput != null && previousOutput.Length == session.Width * session.Height
+                    ? (Color32[])previousOutput.Clone()
+                    : new Color32[session.Width * session.Height]
             };
             int pixelCount = result.outputPixels.Length;
+            var finalChannels = new float[4][];
+            int[] channelOrder = Enumerable.Range(0, 4)
+                .Where(channel => (channelMask & (1 << channel)) != 0)
+                .OrderBy(channel => channel == priorityChannel ? 0 : 1).ToArray();
 
-            for (int channel = 0; channel < 4; channel++)
+            foreach (int channel in channelOrder)
             {
                 TexturePackChannelStack stack = output.channels[channel];
+                var values = new Color[pixelCount];
+                var scalar = new bool[pixelCount];
+                Array.Fill(scalar, true);
+                var deferred = new List<TexturePackPreviewUpdate>();
                 for (int nodeIndex = 0; nodeIndex < stack.nodes.Count; nodeIndex++)
                 {
                     TexturePackNode node = stack.nodes[nodeIndex];
@@ -39,25 +63,61 @@ namespace TexturePackEditor
                     int[] histogram = node.type == TexturePackNodeType.Levels ? new int[256] : null;
                     for (int pixel = 0; pixel < pixelCount; pixel++)
                     {
-                        if (histogram != null)
-                        {
-                            float before = nodeIndex == 0 ? 0 :
-                                TexturePackProcessor.Evaluate(stack.nodes, nodeIndex - 1, session, pixel);
-                            histogram[Mathf.Clamp(Mathf.RoundToInt(before * 255), 0, 255)]++;
-                        }
-                        byte value = (byte)Mathf.RoundToInt(TexturePackProcessor.Evaluate(
-                            stack.nodes, nodeIndex, session, pixel) * 255);
-                        preview[pixel] = new Color32(value, value, value, 255);
+                        if (histogram != null) histogram[ToByte(values[pixel].r)]++;
+                        values[pixel] = TexturePackProcessor.ApplyNode(node, values[pixel], scalar[pixel],
+                            session, pixel, out scalar[pixel]);
+                        preview[pixel] = PreviewColor(values[pixel], scalar[pixel]);
                     }
                     result.nodePixels[node.id] = preview;
-                    if (histogram != null) result.histograms[node.id] = NormalizeHistogram(histogram);
+                    float[] normalizedHistogram = histogram == null ? null : NormalizeHistogram(histogram);
+                    if (normalizedHistogram != null) result.histograms[node.id] = normalizedHistogram;
+                    var update = new TexturePackPreviewUpdate
+                    {
+                        revision = revision, width = result.width, height = result.height,
+                        nodeId = node.id, pixels = preview, histogram = normalizedHistogram
+                    };
+                    if (node.id == priorityNodeId) publish?.Invoke(update);
+                    else if (!string.IsNullOrEmpty(priorityNodeId) && channel == priorityChannel) deferred.Add(update);
+                    else publish?.Invoke(update);
                 }
+                foreach (TexturePackPreviewUpdate update in deferred) publish?.Invoke(update);
+                finalChannels[channel] = values.Select(value => Mathf.Clamp01(value.r)).ToArray();
             }
 
+            foreach (int channel in channelOrder)
             for (int pixel = 0; pixel < pixelCount; pixel++)
-                result.outputPixels[pixel] = TexturePackProcessor.EvaluatePixel(output, session, pixel, false);
+            {
+                Color32 packed = result.outputPixels[pixel];
+                byte value = ToByte(finalChannels[channel][pixel]);
+                switch (channel)
+                {
+                    case 0: packed.r = value; break;
+                    case 1: packed.g = value; break;
+                    case 2: packed.b = value; break;
+                    case 3: packed.a = value; break;
+                }
+                result.outputPixels[pixel] = packed;
+            }
+            publish?.Invoke(new TexturePackPreviewUpdate
+            {
+                revision = revision, width = result.width, height = result.height,
+                pixels = result.outputPixels, isOutput = true
+            });
             return result;
         }
+
+        private static Color32 PreviewColor(Color color, bool scalar)
+        {
+            if (scalar)
+            {
+                byte value = ToByte(color.r);
+                return new Color32(value, value, value, 255);
+            }
+            return new Color32(ToByte(color.r), ToByte(color.g), ToByte(color.b), 255);
+        }
+
+        private static byte ToByte(float value)
+            => (byte)Mathf.RoundToInt(Mathf.Clamp01(value) * 255);
 
         private static float[] NormalizeHistogram(int[] bins)
         {

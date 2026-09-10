@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -13,6 +14,7 @@ namespace TexturePackEditor
         private const string SuffixKey = "TexturePackEditor.SafeOutputSuffix";
         private const string DragKey = "TexturePackEditor.DragPayload";
         private const int PreviewSize = 144;
+        private const int ScalarSignal = 16;
         private const double PreviewDebounce = 0.18;
         private static readonly string[] ChannelNames = { "R", "G", "B", "A" };
         private static readonly Color[] ChannelColors =
@@ -21,6 +23,11 @@ namespace TexturePackEditor
             new(.2f, .52f, 1f, .22f), new(.75f, .75f, .75f, .2f)
         };
         private static List<TexturePackNode> _clipboard = new();
+        private static readonly Dictionary<string, Texture2D> GradientTextures = new();
+        private static readonly Dictionary<int, GUIStyle> NodeHeaderStyles = new();
+        private static GUIStyle _nodeContainerStyle;
+        private static GUIStyle _nodeBodyStyle;
+        private static GUIStyle _signalStyle;
 
         [SerializeField] private Texture2D anchor;
         [SerializeField] private TexturePackRecipe recipe;
@@ -31,8 +38,10 @@ namespace TexturePackEditor
         private readonly Dictionary<string, int> _samplerMasks = new();
         private readonly HashSet<string> _selection = new();
         private readonly Dictionary<string, Texture2D> _nodePreviews = new();
-        private readonly Dictionary<string, float[]> _histograms = new();
+        private readonly Dictionary<string, Texture2D> _histogramPreviews = new();
+        private readonly ConcurrentQueue<TexturePackPreviewUpdate> _previewUpdates = new();
         private Texture2D _outputPreview;
+        private Color32[] _lastOutputPixels;
         private Vector2 _sourceScroll;
         private Vector2 _outputScroll;
         private Vector2 _toolsScroll;
@@ -40,6 +49,7 @@ namespace TexturePackEditor
         private int _lastSelectedChannel = -1;
         private int _activeChannel;
         private bool _previewDirty = true;
+        private int _previewDirtyChannels = 15;
         private double _previewDue;
         private int _previewRevision;
         private Task<TexturePackPreviewResult> _previewTask;
@@ -297,11 +307,14 @@ namespace TexturePackEditor
             if (!stack.expanded) return;
             using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
             {
-                DrawDropZone(channel, 0);
+                int signal = 0;
+                DrawDropZone(channel, 0, signal);
                 for (int node = 0; node < stack.nodes.Count; node++)
                 {
-                    DrawNode(channel, node, stack.nodes[node]);
-                    DrawDropZone(channel, node + 1);
+                    int inputSignal = signal;
+                    signal = SignalAfter(stack.nodes[node], signal);
+                    DrawNode(channel, node, stack.nodes[node], inputSignal, signal);
+                    DrawDropZone(channel, node + 1, signal);
                 }
                 if (stack.nodes.Count == 0)
                     EditorGUILayout.HelpBox("Drag a sampler or tool here.", MessageType.None);
@@ -324,26 +337,29 @@ namespace TexturePackEditor
             }
         }
 
-        private void DrawNode(int channel, int index, TexturePackNode node)
+        private void DrawNode(int channel, int index, TexturePackNode node, int inputSignal, int outputSignal)
         {
             bool selected = _selection.Contains(node.id);
-            using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
+            using (new EditorGUILayout.VerticalScope(NodeContainerStyle))
             {
-                Rect header = GUILayoutUtility.GetRect(24, 25, GUILayout.ExpandWidth(true));
-                EditorGUI.DrawRect(header, selected ? WithAlpha(NodeColor(node.type), .42f) : NodeColor(node.type));
-                Rect fold = new(header.x + 3, header.y + 3, 18, 19);
+                Rect header = GUILayoutUtility.GetRect(27, 28, GUILayout.ExpandWidth(true));
+                GUI.Box(header, GUIContent.none, NodeHeaderStyle(node.type, selected));
+                DrawSignalTransform(header, inputSignal, outputSignal);
+                Rect fold = new(header.x + 21, header.y + 4, 18, 19);
                 Rect remove = new(header.xMax - 23, header.y + 2, 21, 21);
                 if (GUI.Button(fold, node.expanded ? "▼" : "▶", EditorStyles.miniButton))
                 {
                     node.expanded = !node.expanded;
                     MarkRecipeDirty();
                 }
-                GUI.Label(new Rect(header.x + 25, header.y + 3, header.width - 54, 20), NodeTitle(node), EditorStyles.boldLabel);
+                GUI.Label(new Rect(header.x + 43, header.y + 4, header.width - 132, 20), NodeTitle(node), EditorStyles.boldLabel);
+                GUI.Label(new Rect(header.xMax - 102, header.y + 4, 75, 20),
+                    SignalName(inputSignal) + " → " + SignalName(outputSignal), SignalStyle);
                 if (GUI.Button(remove, "×", EditorStyles.miniButton))
                 {
                     ActiveOutput.channels[channel].nodes.RemoveAt(index);
                     _selection.Remove(node.id);
-                    Changed();
+                    Changed(1 << channel);
                     return;
                 }
                 Rect dragArea = new(header.x + 22, header.y, header.width - 48, header.height);
@@ -352,9 +368,10 @@ namespace TexturePackEditor
 
                 if (node.expanded)
                 {
+                    using (new EditorGUILayout.VerticalScope(NodeBodyStyle))
                     using (new EditorGUILayout.HorizontalScope())
                     {
-                        using (new EditorGUILayout.VerticalScope()) DrawNodeSettings(node);
+                        using (new EditorGUILayout.VerticalScope()) DrawNodeSettings(node, channel);
                         if (_nodePreviews.TryGetValue(node.id, out Texture2D preview) && preview != null)
                         {
                             Rect previewRect = GUILayoutUtility.GetRect(82, 82, GUILayout.Width(82), GUILayout.Height(82));
@@ -365,7 +382,7 @@ namespace TexturePackEditor
             }
         }
 
-        private void DrawNodeSettings(TexturePackNode node)
+        private void DrawNodeSettings(TexturePackNode node, int channel)
         {
             EditorGUI.BeginChangeCheck();
             switch (node.type)
@@ -396,7 +413,12 @@ namespace TexturePackEditor
                     EditorGUILayout.LabelField("1 − input", EditorStyles.miniLabel);
                     break;
             }
-            if (EditorGUI.EndChangeCheck()) Changed();
+            if (EditorGUI.EndChangeCheck())
+            {
+                _lastSelectedId = node.id;
+                _lastSelectedChannel = _activeChannel = channel;
+                Changed(1 << channel);
+            }
         }
 
         private void DrawSampleSettings(TexturePackNode node)
@@ -442,7 +464,7 @@ namespace TexturePackEditor
         private void DrawLevelsSettings(TexturePackNode node)
         {
             EditorGUILayout.LabelField("Input Levels", EditorStyles.boldLabel);
-            _histograms.TryGetValue(node.id, out float[] histogram);
+            _histogramPreviews.TryGetValue(node.id, out Texture2D histogram);
             DrawThreePointLevels(node, histogram);
             using (new EditorGUILayout.HorizontalScope())
             {
@@ -515,7 +537,7 @@ namespace TexturePackEditor
             if (removable && GUI.Button(new Rect(card.xMax - 22, card.y + 3, 19, 19), "×", EditorStyles.miniButton))
             {
                 recipe.manualSources.Remove(texture);
-                Changed();
+                MarkRecipeDirty();
             }
             Rect drag = new(card.x, card.y, card.width, 27);
             var sample = new TexturePackNode
@@ -539,14 +561,15 @@ namespace TexturePackEditor
             {
                 if (!recipe.manualSources.Contains(_pendingSource)) recipe.manualSources.Add(_pendingSource);
                 _pendingSource = null;
-                Changed();
+                MarkRecipeDirty();
             }
             EditorGUILayout.Space(3);
         }
 
-        private void DrawDropZone(int channel, int index)
+        private void DrawDropZone(int channel, int index, int signal)
         {
             Rect rect = GUILayoutUtility.GetRect(12, 15, GUILayout.ExpandWidth(true));
+            DrawSignalWires(rect, signal);
             HandleDropTarget(rect, channel, index, false);
         }
 
@@ -643,7 +666,7 @@ namespace TexturePackEditor
             _selection.Add(node.id);
             _lastSelectedId = node.id;
             _lastSelectedChannel = _activeChannel = channel;
-            Changed();
+            Changed(1 << channel);
         }
 
         private List<string> DraggedNodeIds(string clicked)
@@ -653,6 +676,7 @@ namespace TexturePackEditor
         {
             var ordered = new List<TexturePackNode>();
             int removedBefore = 0;
+            int dirtyChannels = 1 << destinationChannel;
             for (int channel = 0; channel < 4; channel++)
             {
                 List<TexturePackNode> nodes = ActiveOutput.channels[channel].nodes;
@@ -660,6 +684,7 @@ namespace TexturePackEditor
                     if (ids.Contains(nodes[i].id))
                     {
                         ordered.Add(nodes[i]);
+                        dirtyChannels |= 1 << channel;
                         if (channel == destinationChannel && i < insertionIndex) removedBefore++;
                     }
             }
@@ -668,7 +693,7 @@ namespace TexturePackEditor
             List<TexturePackNode> destination = ActiveOutput.channels[destinationChannel].nodes;
             destination.InsertRange(Mathf.Clamp(insertionIndex - removedBefore, 0, destination.Count), ordered);
             _activeChannel = destinationChannel;
-            Changed();
+            Changed(dirtyChannels);
         }
 
         private void HandleKeyboard()
@@ -697,15 +722,17 @@ namespace TexturePackEditor
             nodes.InsertRange(insertion, clones);
             _selection.Clear();
             foreach (TexturePackNode clone in clones) _selection.Add(clone.id);
-            Changed();
+            Changed(1 << _activeChannel);
         }
 
         private void DeleteSelection()
         {
-            foreach (TexturePackChannelStack stack in ActiveOutput.channels)
-                stack.nodes.RemoveAll(node => _selection.Contains(node.id));
+            int dirtyChannels = 0;
+            for (int channel = 0; channel < ActiveOutput.channels.Count; channel++)
+                if (ActiveOutput.channels[channel].nodes.RemoveAll(node => _selection.Contains(node.id)) > 0)
+                    dirtyChannels |= 1 << channel;
             _selection.Clear();
-            Changed();
+            if (dirtyChannels != 0) Changed(dirtyChannels);
         }
 
         private void EnsureRecipe()
@@ -765,10 +792,11 @@ namespace TexturePackEditor
             }
         }
 
-        private void Changed()
+        private void Changed(int channelMask = 15)
         {
             if (recipe != null && recipe != _transientRecipe) EditorUtility.SetDirty(recipe);
             _previewDirty = true;
+            _previewDirtyChannels |= channelMask & 15;
             _previewRevision++;
             _previewDue = EditorApplication.timeSinceStartup + PreviewDebounce;
             Repaint();
@@ -782,6 +810,9 @@ namespace TexturePackEditor
 
         private void PreviewUpdate()
         {
+            while (_previewUpdates.TryDequeue(out TexturePackPreviewUpdate update))
+                if (update.revision == _previewRevision) ApplyPreviewUpdate(update);
+
             if (_previewTask != null && _previewTask.IsCompleted)
             {
                 TexturePackPreviewResult result = null;
@@ -796,7 +827,7 @@ namespace TexturePackEditor
                     _previewSession = null;
                     _previewTask = null;
                 }
-                if (result != null && result.revision == _previewRevision) ApplyPreview(result);
+                // Progressive updates already applied each node and the packed output as they became ready.
                 Repaint();
             }
             if (_previewTask == null && _previewDirty && EditorApplication.timeSinceStartup >= _previewDue)
@@ -812,11 +843,20 @@ namespace TexturePackEditor
             {
                 _sourceSet = TexturePackSourceSet.Detect(anchor);
                 TexturePackOutput snapshot = ActiveOutput.Clone(true);
+                int channelMask = _previewDirtyChannels == 0 ? 15 : _previewDirtyChannels;
+                _previewDirtyChannels = 0;
                 _previewSession = new TexturePackPixelSession(_sourceSet, PreviewSize, PreviewSize);
-                _previewSession.Prepare(snapshot.channels.SelectMany(stack => stack.nodes));
+                _previewSession.Prepare(snapshot.channels.Where((stack, channel) =>
+                    (channelMask & (1 << channel)) != 0).SelectMany(stack => stack.nodes));
                 int revision = _previewRevision;
                 TexturePackPixelSession session = _previewSession;
-                _previewTask = Task.Run(() => TexturePackPreviewWork.Compute(revision, snapshot, session));
+                Color32[] previousOutput = _lastOutputPixels == null ? null :
+                    (Color32[])_lastOutputPixels.Clone();
+                int priorityChannel = _lastSelectedChannel >= 0 ? _lastSelectedChannel : _activeChannel;
+                string priorityNode = _lastSelectedId;
+                _previewTask = Task.Run(() => TexturePackPreviewWork.Compute(revision, snapshot, session,
+                    channelMask, previousOutput, priorityChannel, priorityNode,
+                    update => _previewUpdates.Enqueue(update)));
             }
             catch (Exception exception)
             {
@@ -826,13 +866,27 @@ namespace TexturePackEditor
             }
         }
 
-        private void ApplyPreview(TexturePackPreviewResult result)
+        private void ApplyPreviewUpdate(TexturePackPreviewUpdate update)
         {
-            DestroyPreviews();
-            foreach (var pair in result.nodePixels)
-                _nodePreviews[pair.Key] = CreatePreviewTexture(result.width, result.height, pair.Value);
-            foreach (var pair in result.histograms) _histograms[pair.Key] = pair.Value;
-            _outputPreview = CreatePreviewTexture(result.width, result.height, result.outputPixels);
+            if (update.isOutput)
+            {
+                if (_outputPreview != null) DestroyImmediate(_outputPreview);
+                _outputPreview = CreatePreviewTexture(update.width, update.height, update.pixels);
+                _lastOutputPixels = (Color32[])update.pixels.Clone();
+            }
+            else
+            {
+                if (_nodePreviews.TryGetValue(update.nodeId, out Texture2D previous) && previous != null)
+                    DestroyImmediate(previous);
+                _nodePreviews[update.nodeId] = CreatePreviewTexture(update.width, update.height, update.pixels);
+                if (update.histogram != null)
+                {
+                    if (_histogramPreviews.TryGetValue(update.nodeId, out Texture2D oldHistogram) && oldHistogram != null)
+                        DestroyImmediate(oldHistogram);
+                    _histogramPreviews[update.nodeId] = CreateHistogramTexture(update.histogram);
+                }
+            }
+            Repaint();
         }
 
         private static Texture2D CreatePreviewTexture(int width, int height, Color32[] pixels)
@@ -848,9 +902,28 @@ namespace TexturePackEditor
         {
             foreach (Texture2D preview in _nodePreviews.Values) if (preview != null) DestroyImmediate(preview);
             _nodePreviews.Clear();
-            _histograms.Clear();
+            foreach (Texture2D preview in _histogramPreviews.Values) if (preview != null) DestroyImmediate(preview);
+            _histogramPreviews.Clear();
             if (_outputPreview != null) DestroyImmediate(_outputPreview);
             _outputPreview = null;
+            _lastOutputPixels = null;
+        }
+
+        private static Texture2D CreateHistogramTexture(float[] bins)
+        {
+            const int height = 64;
+            var pixels = new Color32[bins.Length * height];
+            var fill = new Color32(210, 210, 210, 170);
+            for (int x = 0; x < bins.Length; x++)
+            {
+                int columnHeight = Mathf.Clamp(Mathf.CeilToInt(bins[x] * height), 0, height);
+                for (int y = 0; y < columnHeight; y++) pixels[y * bins.Length + x] = fill;
+            }
+            var texture = new Texture2D(bins.Length, height, TextureFormat.RGBA32, false, true)
+            { hideFlags = HideFlags.HideAndDontSave, filterMode = FilterMode.Bilinear, wrapMode = TextureWrapMode.Clamp };
+            texture.SetPixels32(pixels);
+            texture.Apply(false, true);
+            return texture;
         }
 
         private float DrawColoredSlider(string label, float value, Color color, string key)
@@ -897,14 +970,14 @@ namespace TexturePackEditor
         }
 
         private void DrawTwoPointSlider(string key, ref float minimum, ref float maximum,
-            float[] histogram, Color left, Color right)
+            Texture2D histogram, Color left, Color right)
         {
             Rect rect = GUILayoutUtility.GetRect(120, histogram == null ? 28 : 68, GUILayout.ExpandWidth(true));
-            if (histogram != null) DrawHistogram(new Rect(rect.x + 5, rect.y, rect.width - 10, rect.height - 20), histogram, Color.white);
+            if (histogram != null) DrawHistogram(new Rect(rect.x + 5, rect.y, rect.width - 10, rect.height - 20), histogram);
             Rect track = new(rect.x + 5, rect.yMax - 17, rect.width - 10, 9);
             DrawGradient(track, left, right);
             float[] values = { minimum, maximum };
-            if (HandleMultiSlider(key, track, values))
+            if (HandleMultiSlider(key, track, values) >= 0)
             {
                 minimum = Mathf.Min(values[0], values[1]); maximum = Mathf.Max(values[0], values[1]);
             }
@@ -912,52 +985,60 @@ namespace TexturePackEditor
             DrawThumb(track, maximum, Color.white);
         }
 
-        private void DrawThreePointLevels(TexturePackNode node, float[] histogram)
+        private void DrawThreePointLevels(TexturePackNode node, Texture2D histogram)
         {
             Rect rect = GUILayoutUtility.GetRect(160, 82, GUILayout.ExpandWidth(true));
             Rect histogramRect = new(rect.x + 5, rect.y, rect.width - 10, 58);
-            DrawHistogram(histogramRect, histogram, new Color(.8f, .8f, .8f));
+            DrawHistogram(histogramRect, histogram);
             Rect track = new(rect.x + 5, rect.yMax - 18, rect.width - 10, 9);
             DrawGradient(track, Color.black, Color.white);
             float midpoint = Mathf.Lerp(node.inputBlack, node.inputWhite, Mathf.Pow(.5f, node.gamma));
+            float midpointProportion = Mathf.InverseLerp(node.inputBlack, node.inputWhite, midpoint);
             float[] values = { node.inputBlack, midpoint, node.inputWhite };
-            if (HandleMultiSlider(node.id + ":levelsInput", track, values))
+            int changedHandle = HandleMultiSlider(node.id + ":levelsInput", track, values, true);
+            if (changedHandle >= 0)
             {
-                node.inputBlack = Mathf.Min(values[0], values[1]);
-                node.inputWhite = Mathf.Max(values[1], values[2]);
-                float range = node.inputWhite - node.inputBlack;
-                if (range > .0001f)
+                node.inputBlack = values[0];
+                node.inputWhite = values[2];
+                if (changedHandle == 1)
                 {
-                    float normalized = Mathf.Clamp((values[1] - node.inputBlack) / range, .0625f, .9659f);
-                    node.gamma = Mathf.Clamp(Mathf.Log(normalized) / Mathf.Log(.5f), .05f, 4);
+                    float range = node.inputWhite - node.inputBlack;
+                    if (range > .0001f)
+                    {
+                        float normalized = Mathf.Clamp((values[1] - node.inputBlack) / range, .0625f, .9659f);
+                        node.gamma = Mathf.Clamp(Mathf.Log(normalized) / Mathf.Log(.5f), .05f, 4);
+                    }
                 }
-                midpoint = values[1];
+                midpoint = changedHandle == 1 ? values[1] :
+                    Mathf.Lerp(node.inputBlack, node.inputWhite, midpointProportion);
             }
             DrawThumb(track, node.inputBlack, Color.black);
             DrawThumb(track, midpoint, Color.gray);
             DrawThumb(track, node.inputWhite, Color.white);
         }
 
-        private bool HandleMultiSlider(string key, Rect track, float[] values)
+        private int HandleMultiSlider(string key, Rect track, float[] values, bool endpointsSpanMiddle = false)
         {
-            bool changed = false;
+            int changedHandle = -1;
             Event current = Event.current;
-            if (current.type == EventType.MouseDown && new Rect(track.x, track.y - 8, track.width, track.height + 20).Contains(current.mousePosition))
+            bool begin = current.type == EventType.MouseDown &&
+                         new Rect(track.x, track.y - 8, track.width, track.height + 20).Contains(current.mousePosition);
+            if (begin)
             {
                 float normalized = Mathf.InverseLerp(track.x, track.xMax, current.mousePosition.x);
                 _sliderHandle = 0;
                 for (int i = 1; i < values.Length; i++)
                     if (Mathf.Abs(values[i] - normalized) < Mathf.Abs(values[_sliderHandle] - normalized)) _sliderHandle = i;
                 _sliderKey = key;
-                current.Use();
             }
-            if (current.type == EventType.MouseDrag && _sliderKey == key && _sliderHandle >= 0)
+            if ((begin || current.type == EventType.MouseDrag) && _sliderKey == key && _sliderHandle >= 0)
             {
                 float value = Mathf.Clamp01(Mathf.InverseLerp(track.x, track.xMax, current.mousePosition.x));
-                float low = _sliderHandle == 0 ? 0 : values[_sliderHandle - 1];
-                float high = _sliderHandle == values.Length - 1 ? 1 : values[_sliderHandle + 1];
+                bool spanningEndpoint = endpointsSpanMiddle && values.Length == 3 && _sliderHandle != 1;
+                float low = _sliderHandle == 0 ? 0 : spanningEndpoint ? values[0] : values[_sliderHandle - 1];
+                float high = _sliderHandle == values.Length - 1 ? 1 : spanningEndpoint ? values[2] : values[_sliderHandle + 1];
                 values[_sliderHandle] = Mathf.Clamp(value, low, high);
-                changed = true;
+                changedHandle = _sliderHandle;
                 GUI.changed = true;
                 current.Use();
             }
@@ -965,26 +1046,170 @@ namespace TexturePackEditor
             {
                 _sliderKey = null; _sliderHandle = -1; current.Use();
             }
-            return changed;
+            return changedHandle;
         }
 
-        private static void DrawHistogram(Rect rect, float[] bins, Color color)
+        private static void DrawHistogram(Rect rect, Texture2D histogram)
         {
             EditorGUI.DrawRect(rect, new Color(0, 0, 0, .28f));
-            if (bins == null || bins.Length == 0) return;
-            float width = rect.width / bins.Length;
-            for (int i = 0; i < bins.Length; i++)
-                EditorGUI.DrawRect(new Rect(rect.x + i * width, rect.yMax - bins[i] * rect.height,
-                    Mathf.Max(1, width), bins[i] * rect.height), WithAlpha(color, .55f));
+            if (histogram != null) GUI.DrawTexture(rect, histogram, ScaleMode.StretchToFill, true);
         }
 
         private static void DrawGradient(Rect rect, Color left, Color right)
         {
-            const int steps = 48;
-            float width = rect.width / steps;
-            for (int i = 0; i < steps; i++)
-                EditorGUI.DrawRect(new Rect(rect.x + i * width, rect.y, width + 1, rect.height),
-                    Color.Lerp(left, right, i / (float)(steps - 1)));
+            GUI.DrawTexture(rect, GradientTexture(left, right), ScaleMode.StretchToFill, true);
+        }
+
+        private static Texture2D GradientTexture(Color left, Color right)
+        {
+            Color32 left32 = left;
+            Color32 right32 = right;
+            string key = $"{left32.r:X2}{left32.g:X2}{left32.b:X2}{left32.a:X2}-" +
+                         $"{right32.r:X2}{right32.g:X2}{right32.b:X2}{right32.a:X2}";
+            if (GradientTextures.TryGetValue(key, out Texture2D cached) && cached != null) return cached;
+            const int width = 256;
+            var pixels = new Color32[width];
+            for (int x = 0; x < width; x++) pixels[x] = Color.Lerp(left, right, x / (width - 1f));
+            var texture = new Texture2D(width, 1, TextureFormat.RGBA32, false, true)
+            { hideFlags = HideFlags.HideAndDontSave, filterMode = FilterMode.Bilinear, wrapMode = TextureWrapMode.Clamp };
+            texture.SetPixels32(pixels);
+            texture.Apply(false, true);
+            GradientTextures[key] = texture;
+            return texture;
+        }
+
+        private static GUIStyle NodeContainerStyle => _nodeContainerStyle ??= new GUIStyle(EditorStyles.helpBox)
+        {
+            padding = new RectOffset(0, 0, 0, 0),
+            margin = new RectOffset(2, 2, 2, 3)
+        };
+
+        private static GUIStyle NodeBodyStyle => _nodeBodyStyle ??= new GUIStyle
+        {
+            padding = new RectOffset(7, 7, 5, 7)
+        };
+
+        private static GUIStyle SignalStyle
+        {
+            get
+            {
+                return _signalStyle ??= new GUIStyle(EditorStyles.miniLabel)
+                {
+                    alignment = TextAnchor.MiddleRight,
+                    richText = true
+                };
+            }
+        }
+
+        private static GUIStyle NodeHeaderStyle(TexturePackNodeType type, bool selected)
+        {
+            int key = (int)type + (selected ? 100 : 0);
+            if (NodeHeaderStyles.TryGetValue(key, out GUIStyle style)) return style;
+            Color color = WithAlpha(NodeColor(type), selected ? .48f : .30f);
+            var texture = CreateRoundedTexture(color);
+            style = new GUIStyle
+            {
+                normal = { background = texture },
+                border = new RectOffset(8, 8, 8, 8),
+                padding = new RectOffset(0, 0, 0, 0),
+                margin = new RectOffset(0, 0, 0, 0)
+            };
+            NodeHeaderStyles[key] = style;
+            return style;
+        }
+
+        private static Texture2D CreateRoundedTexture(Color color)
+        {
+            const int size = 18;
+            const int radius = 6;
+            var pixels = new Color32[size * size];
+            for (int y = 0; y < size; y++)
+            for (int x = 0; x < size; x++)
+            {
+                float nearestX = Mathf.Clamp(x + .5f, radius, size - radius);
+                float nearestY = Mathf.Clamp(y + .5f, radius, size - radius);
+                float distance = Vector2.Distance(new Vector2(x + .5f, y + .5f), new Vector2(nearestX, nearestY));
+                float coverage = Mathf.Clamp01(radius + .5f - distance);
+                Color pixel = color;
+                pixel.a *= coverage;
+                pixels[y * size + x] = pixel;
+            }
+            var texture = new Texture2D(size, size, TextureFormat.RGBA32, false, true)
+            { hideFlags = HideFlags.HideAndDontSave, filterMode = FilterMode.Bilinear, wrapMode = TextureWrapMode.Clamp };
+            texture.SetPixels32(pixels);
+            texture.Apply(false, true);
+            return texture;
+        }
+
+        private static int SignalAfter(TexturePackNode node, int input)
+        {
+            if (node.type == TexturePackNodeType.Sample)
+            {
+                int mask = node.channelMask & 15;
+                return mask != 0 && (mask & (mask - 1)) == 0 ? ScalarSignal : mask;
+            }
+            if (node.type == TexturePackNodeType.Constant) return ScalarSignal;
+            if (node.type == TexturePackNodeType.Desaturate &&
+                (input == ScalarSignal || node.desaturateAmount >= .999f)) return ScalarSignal;
+            return input;
+        }
+
+        private static string SignalName(int signal)
+            => signal == 0 ? "—" : signal == ScalarSignal ? "1" : MaskName(signal);
+
+        private static void DrawSignalWires(Rect rect, int signal)
+        {
+            if (signal == 0) return;
+            Handles.BeginGUI();
+            foreach ((float x, Color color) in SignalPositions(rect.x, signal))
+            {
+                Handles.color = color;
+                Handles.DrawAAPolyLine(2f, new Vector3(x, rect.y), new Vector3(x, rect.yMax));
+            }
+            Handles.EndGUI();
+        }
+
+        private static void DrawSignalTransform(Rect rect, int input, int output)
+        {
+            if (input == 0 && output == 0) return;
+            float middleY = rect.center.y;
+            float centerX = rect.x + 10;
+            Handles.BeginGUI();
+            if (input == output)
+            {
+                foreach ((float x, Color color) in SignalPositions(rect.x, output))
+                {
+                    Handles.color = color;
+                    Handles.DrawAAPolyLine(2f, new Vector3(x, rect.y), new Vector3(x, rect.yMax));
+                }
+            }
+            else
+            {
+                foreach ((float x, Color color) in SignalPositions(rect.x, input))
+                {
+                    Handles.color = color;
+                    Handles.DrawAAPolyLine(2f, new Vector3(x, rect.y), new Vector3(centerX, middleY));
+                }
+                foreach ((float x, Color color) in SignalPositions(rect.x, output))
+                {
+                    Handles.color = color;
+                    Handles.DrawAAPolyLine(2f, new Vector3(centerX, middleY), new Vector3(x, rect.yMax));
+                }
+            }
+            Handles.EndGUI();
+        }
+
+        private static IEnumerable<(float x, Color color)> SignalPositions(float left, int signal)
+        {
+            if (signal == ScalarSignal)
+            {
+                yield return (left + 10, new Color(1, 1, 1, .82f));
+                yield break;
+            }
+            Color[] colors = { Color.red, Color.green, new Color(.2f, .5f, 1f), Color.white };
+            for (int channel = 0; channel < 4; channel++)
+                if ((signal & (1 << channel)) != 0)
+                    yield return (left + 5 + channel * 3.2f, WithAlpha(colors[channel], .82f));
         }
 
         private static void DrawThumb(Rect track, float value, Color color)

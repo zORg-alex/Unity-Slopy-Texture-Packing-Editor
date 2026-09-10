@@ -27,4 +27,12 @@ to be applied to another similarly named texture set. Manual sources remain dire
 Desaturate defaults to linear Rec.709 luminance: R 0.2126, G 0.7152, B 0.0722. Green contributes most to
 perceived brightness, followed by red and then blue. Its colored weight rails, amount, and two-point output
 range are editable. Levels displays the incoming channel histogram with colliding black, midpoint, and white
-input handles plus a grayscale two-point output control.
+input handles plus a grayscale two-point output control. Moving either endpoint preserves the midpoint's
+proportional position within the remaining range. Signal wires and input/output labels show whether a node
+is carrying a scalar or a multi-channel value; partial Desaturate keeps multiple channels, while a full
+Desaturate collapses them to one luminance value.
+
+Preview evaluation uses a single forward pass through changed channel stacks; unchanged packed channels are
+reused. The actively edited channel is processed first, individual node previews and cached histogram textures
+appear as soon as they are ready, and the packed output follows separately. This avoids repeated upstream
+evaluation and avoids redrawing histogram bars or slider gradients as many separate IMGUI rectangles.
