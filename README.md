@@ -28,11 +28,14 @@ Desaturate defaults to linear Rec.709 luminance: R 0.2126, G 0.7152, B 0.0722. G
 perceived brightness, followed by red and then blue. Its colored weight rails, amount, and two-point output
 range are editable. Levels displays the incoming channel histogram with colliding black, midpoint, and white
 input handles plus a grayscale two-point output control. Moving either endpoint preserves the midpoint's
-proportional position within the remaining range. Signal wires and input/output labels show whether a node
-is carrying a scalar or a multi-channel value; partial Desaturate keeps multiple channels, while a full
-Desaturate collapses them to one luminance value.
+proportional position within the remaining range. Thick channel-colored connections appear only between
+nodes; partial Desaturate keeps multiple wires, while a full Desaturate produces one scalar wire.
 
 Preview evaluation uses a single forward pass through changed channel stacks; unchanged packed channels are
-reused. The actively edited channel is processed first, individual node previews and cached histogram textures
-appear as soon as they are ready, and the packed output follows separately. This avoids repeated upstream
-evaluation and avoids redrawing histogram bars or slider gradients as many separate IMGUI rectangles.
+reused. The actively edited channel is processed first, individual node previews and histogram data appear as
+soon as they are ready, and the packed output follows separately. Histograms use one anti-aliased polyline and
+slider gradients use cached textures rather than many overlapping IMGUI rectangles.
+
+The left divider resizes the source and preview column. The large preview can show the final output or the
+selected node, isolate R/G/B/A, zoom around the cursor with the wheel, and pan by dragging. Zoom changes the
+sampled UV region, so the worker renders only the visible portion; `1:1` matches source texels to preview pixels.

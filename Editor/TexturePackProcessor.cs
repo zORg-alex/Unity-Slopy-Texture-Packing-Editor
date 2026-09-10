@@ -11,6 +11,7 @@ namespace TexturePackEditor
         private readonly TexturePackSourceSet _sources;
         private readonly int _width;
         private readonly int _height;
+        private readonly Rect _uvRect;
         private readonly Dictionary<Texture2D, Color[]> _pixels = new();
         private readonly Dictionary<string, Color[]> _preparedNodePixels = new();
         private bool _prepared;
@@ -19,10 +20,16 @@ namespace TexturePackEditor
         public int Height => _height;
 
         public TexturePackPixelSession(TexturePackSourceSet sources, int width, int height)
+            : this(sources, width, height, new Rect(0, 0, 1, 1))
+        {
+        }
+
+        public TexturePackPixelSession(TexturePackSourceSet sources, int width, int height, Rect uvRect)
         {
             _sources = sources;
             _width = width;
             _height = height;
+            _uvRect = uvRect;
         }
 
         public Color Sample(TexturePackNode node, int pixel)
@@ -33,7 +40,7 @@ namespace TexturePackEditor
             if (texture == null) return Color.black;
             if (!_pixels.TryGetValue(texture, out var colors))
             {
-                colors = ReadLinear(texture, _width, _height);
+                colors = ReadLinear(texture, _width, _height, _uvRect);
                 _pixels.Add(texture, colors);
             }
             return colors[pixel];
@@ -49,7 +56,7 @@ namespace TexturePackEditor
                 if (texture == null) continue;
                 if (!_pixels.TryGetValue(texture, out var colors))
                 {
-                    colors = ReadLinear(texture, _width, _height);
+                    colors = ReadLinear(texture, _width, _height, _uvRect);
                     _pixels.Add(texture, colors);
                 }
                 _preparedNodePixels[node.id] = colors;
@@ -63,14 +70,15 @@ namespace TexturePackEditor
             _preparedNodePixels.Clear();
         }
 
-        private static Color[] ReadLinear(Texture2D source, int width, int height)
+        private static Color[] ReadLinear(Texture2D source, int width, int height, Rect uvRect)
         {
             RenderTexture temporary = RenderTexture.GetTemporary(width, height, 0,
                 RenderTextureFormat.ARGBFloat, RenderTextureReadWrite.Linear);
             var previous = RenderTexture.active;
             try
             {
-                Graphics.Blit(source, temporary);
+                Graphics.Blit(source, temporary, new Vector2(uvRect.width, uvRect.height),
+                    new Vector2(uvRect.x, uvRect.y));
                 RenderTexture.active = temporary;
                 var readable = new Texture2D(width, height, TextureFormat.RGBAFloat, false, true);
                 readable.ReadPixels(new Rect(0, 0, width, height), 0, 0);

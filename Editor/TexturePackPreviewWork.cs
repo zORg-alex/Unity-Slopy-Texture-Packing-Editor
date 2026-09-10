@@ -111,9 +111,9 @@ namespace TexturePackEditor
             if (scalar)
             {
                 byte value = ToByte(color.r);
-                return new Color32(value, value, value, 255);
+                return new Color32(value, value, value, value);
             }
-            return new Color32(ToByte(color.r), ToByte(color.g), ToByte(color.b), 255);
+            return new Color32(ToByte(color.r), ToByte(color.g), ToByte(color.b), ToByte(color.a));
         }
 
         private static byte ToByte(float value)
