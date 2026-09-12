@@ -1,11 +1,34 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Threading;
 using UnityEditor;
 using UnityEngine;
 
 namespace TexturePackEditor
 {
+    public sealed class TexturePackBakePlan : IDisposable
+    {
+        internal TexturePackOutput output;
+        internal TexturePackPixelSession session;
+        internal string outputPath;
+        internal string sourcePath;
+        internal string recipeGuid;
+        internal int outputIndex;
+        internal bool encodeSrgb;
+
+        public string OutputPath => outputPath;
+        public int Width => session.Width;
+        public int Height => session.Height;
+
+        public void Dispose()
+        {
+            session?.Dispose();
+            session = null;
+        }
+    }
+
     public sealed class TexturePackPixelSession : IDisposable
     {
         private readonly TexturePackSourceSet _sources;
@@ -253,7 +276,8 @@ namespace TexturePackEditor
             return preview;
         }
 
-        public static string Bake(TexturePackRecipe recipe, int outputIndex, Texture2D anchor, string suffix)
+        public static TexturePackBakePlan PrepareBake(TexturePackRecipe recipe, int outputIndex,
+            Texture2D anchor, string suffix, TexturePackOutput outputSnapshot = null)
         {
             if (recipe == null || anchor == null) throw new ArgumentNullException();
             string recipePath = AssetDatabase.GetAssetPath(recipe);
@@ -264,7 +288,7 @@ namespace TexturePackEditor
             recipe.EnsureOutputs();
             if (outputIndex < 0 || outputIndex >= recipe.outputs.Count)
                 throw new ArgumentOutOfRangeException(nameof(outputIndex));
-            TexturePackOutput output = recipe.outputs[outputIndex];
+            TexturePackOutput output = outputSnapshot ?? recipe.outputs[outputIndex];
             TexturePackSourceSet sources = TexturePackSourceSet.Detect(anchor);
             Texture2D outputBase = sources.ResolveRole(output.outputBaseRole);
             if (outputBase == null) throw new InvalidOperationException("Output-base role is unresolved: " + output.outputBaseRole);
@@ -280,25 +304,125 @@ namespace TexturePackEditor
             bool outputSrgb = outputImporter != null && outputImporter.sRGBTexture;
             int width = outputBase.width;
             int height = outputBase.height;
-
-            using (var session = new TexturePackPixelSession(sources, width, height))
+            var session = new TexturePackPixelSession(sources, width, height, new Rect(0, 0, 1, 1), true);
+            try
             {
-                var pixels = new Color32[width * height];
-                for (int i = 0; i < pixels.Length; i++) pixels[i] = EvaluatePixel(output, session, i, outputSrgb);
-                var texture = new Texture2D(width, height, TextureFormat.RGBA32, false, true);
-                texture.SetPixels32(pixels);
-                texture.Apply(false, false);
-                File.WriteAllBytes(Path.GetFullPath(outputPath), texture.EncodeToTGA());
-                UnityEngine.Object.DestroyImmediate(texture);
+                TexturePackOutput snapshot = output.Clone(true);
+                session.Prepare(snapshot.channels.SelectMany(channel => channel.nodes));
+                return new TexturePackBakePlan
+                {
+                    output = snapshot,
+                    session = session,
+                    outputPath = outputPath,
+                    sourcePath = basePath,
+                    recipeGuid = recipeGuid,
+                    outputIndex = outputIndex,
+                    encodeSrgb = outputSrgb
+                };
             }
+            catch
+            {
+                session.Dispose();
+                throw;
+            }
+        }
 
-            AssetDatabase.ImportAsset(outputPath, ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
-            ConfigureImporter(outputPath, outputImporter, recipeGuid);
-            output.lastGeneratedPath = outputPath;
+        public static void ExecuteBake(TexturePackBakePlan plan, Action<float> reportProgress = null,
+            CancellationToken cancellationToken = default)
+        {
+            if (plan == null || plan.session == null) throw new ArgumentNullException(nameof(plan));
+            int width = plan.Width;
+            int height = plan.Height;
+            var pixels = new Color32[checked(width * height)];
+            int progressInterval = Mathf.Max(1, pixels.Length / 200);
+            for (int pixel = 0; pixel < pixels.Length; pixel++)
+            {
+                if (pixel % progressInterval == 0)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    reportProgress?.Invoke(pixel / (float)pixels.Length * .86f);
+                }
+                pixels[pixel] = EvaluatePixel(plan.output, plan.session, pixel, plan.encodeSrgb);
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+            WriteTga(plan.outputPath, pixels, width, height, reportProgress, cancellationToken);
+            reportProgress?.Invoke(1);
+        }
+
+        public static string CompleteBake(TexturePackBakePlan plan, TexturePackRecipe recipe)
+        {
+            if (plan == null) throw new ArgumentNullException(nameof(plan));
+            if (recipe == null) throw new ArgumentNullException(nameof(recipe));
+            AssetDatabase.ImportAsset(plan.outputPath,
+                ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+            ConfigureImporter(plan.outputPath, AssetImporter.GetAtPath(plan.sourcePath) as TextureImporter,
+                plan.recipeGuid);
+            recipe.EnsureOutputs();
+            if (plan.outputIndex >= 0 && plan.outputIndex < recipe.outputs.Count)
+                recipe.outputs[plan.outputIndex].lastGeneratedPath = plan.outputPath;
             recipe.EnsureOutputs();
             EditorUtility.SetDirty(recipe);
             AssetDatabase.SaveAssetIfDirty(recipe);
-            return outputPath;
+            return plan.outputPath;
+        }
+
+        public static string Bake(TexturePackRecipe recipe, int outputIndex, Texture2D anchor, string suffix)
+        {
+            using TexturePackBakePlan plan = PrepareBake(recipe, outputIndex, anchor, suffix);
+            ExecuteBake(plan);
+            return CompleteBake(plan, recipe);
+        }
+
+        private static void WriteTga(string assetPath, Color32[] pixels, int width, int height,
+            Action<float> reportProgress, CancellationToken cancellationToken)
+        {
+            if (width > ushort.MaxValue || height > ushort.MaxValue)
+                throw new InvalidOperationException("TGA dimensions cannot exceed 65535 pixels.");
+            string destination = Path.GetFullPath(assetPath);
+            string temporary = destination + ".texture-pack-" + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write,
+                           FileShare.None, 65536))
+                {
+                    byte[] header = new byte[18];
+                    header[2] = 2;
+                    header[12] = (byte)width;
+                    header[13] = (byte)(width >> 8);
+                    header[14] = (byte)height;
+                    header[15] = (byte)(height >> 8);
+                    header[16] = 32;
+                    stream.Write(header, 0, header.Length);
+                    var row = new byte[width * 4];
+                    int progressInterval = Mathf.Max(1, height / 100);
+                    for (int y = 0; y < height; y++)
+                    {
+                        if (y % progressInterval == 0)
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            reportProgress?.Invoke(.86f + y / (float)height * .13f);
+                        }
+                        int sourceOffset = y * width;
+                        for (int x = 0; x < width; x++)
+                        {
+                            Color32 color = pixels[sourceOffset + x];
+                            int target = x * 4;
+                            row[target] = color.b;
+                            row[target + 1] = color.g;
+                            row[target + 2] = color.r;
+                            row[target + 3] = color.a;
+                        }
+                        stream.Write(row, 0, row.Length);
+                    }
+                }
+                cancellationToken.ThrowIfCancellationRequested();
+                if (File.Exists(destination)) File.Replace(temporary, destination, null);
+                else File.Move(temporary, destination);
+            }
+            finally
+            {
+                if (File.Exists(temporary)) File.Delete(temporary);
+            }
         }
 
         public static Color32 EvaluatePixel(TexturePackOutput output, TexturePackPixelSession session, int pixel,

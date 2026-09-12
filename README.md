@@ -21,6 +21,12 @@ RGBA TGA next to that texture using the persistent safe suffix. Source assets ar
 An existing generated file is replaced only when its importer marker and recipe match; otherwise Unity
 chooses a unique filename.
 
+Full-resolution channel evaluation and TGA writing run as a cancellable background job. A progress bar at
+the top of the window reports source capture, packing, writing, and import stages. The active recipe, anchor,
+suffix, and output stacks are snapshotted when generation starts, so the rest of the editor remains available
+for preparing another texture while the current job finishes. Unity texture capture and final asset import
+remain on the Editor thread because Unity does not expose those operations as thread-safe APIs.
+
 Recipes store detected sources by filename role (the part after the shared prefix), allowing the same stacks
 to be applied to another similarly named texture set. Manual sources remain direct asset references.
 
@@ -42,5 +48,6 @@ sampled UV region, so the worker renders only the visible portion; `1:1` matches
 
 Preview jobs are canceled when superseded. Non-selected node results are retained only as 96-pixel thumbnails,
 the selected node owns the one full viewport-sized result, and caches are pruned when nodes or output tabs change.
-Preview source capture uses compact linear RGBA32 storage; final exported textures keep the high-precision path.
-Closing the window destroys all preview, gradient, and editor-chrome textures immediately.
+Preview and export source capture use compact linear RGBA32 storage, matching the 8-bit-per-channel TGA output
+while avoiding the previous RGBAFloat memory spike. Closing the window cancels active work and destroys all
+preview, gradient, and editor-chrome textures immediately.

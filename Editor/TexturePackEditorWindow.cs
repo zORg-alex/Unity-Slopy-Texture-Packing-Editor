@@ -63,6 +63,20 @@ namespace TexturePackEditor
         private CancellationTokenSource _previewCancellation;
         private TexturePackPixelSession _previewSession;
         private string _previewError;
+        private readonly ConcurrentQueue<GenerationProgress> _generationUpdates = new();
+        private Task _generationTask;
+        private CancellationTokenSource _generationCancellation;
+        private TexturePackBakePlan _generationPlan;
+        private int[] _generationOutputs;
+        private TexturePackOutput[] _generationOutputSnapshots;
+        private TexturePackRecipe _generationRecipe;
+        private Texture2D _generationAnchor;
+        private string _generationSuffix;
+        private int _generationOutputPosition;
+        private float _generationProgress;
+        private string _generationStatus;
+        private string _generationLastPath;
+        private bool _generationActive;
         private string _sliderKey;
         private int _sliderHandle = -1;
         private bool _resizingLeftColumn;
@@ -75,6 +89,12 @@ namespace TexturePackEditor
         {
             public TexturePackNode Node;
             public List<string> NodeIds;
+        }
+
+        private sealed class GenerationProgress
+        {
+            public float value;
+            public string status;
         }
 
         [MenuItem("Tools/Texture Pack Editor")]
@@ -109,7 +129,9 @@ namespace TexturePackEditor
         {
             Selection.selectionChanged -= OnProjectSelectionChanged;
             EditorApplication.update -= PreviewUpdate;
+            EditorApplication.delayCall -= StartNextGenerationOutput;
             _previewCancellation?.Cancel();
+            _generationCancellation?.Cancel();
             DestroyPreviews();
             ClearPreviewUpdates();
             if (_previewTask == null) _previewSession?.Dispose();
@@ -126,6 +148,19 @@ namespace TexturePackEditor
             _previewSession = null;
             _previewCancellation?.Dispose();
             _previewCancellation = null;
+            if (_generationTask == null) _generationPlan?.Dispose();
+            else
+            {
+                TexturePackBakePlan plan = _generationPlan;
+                _generationTask.ContinueWith(completedTask =>
+                {
+                    _ = completedTask.Exception;
+                    plan?.Dispose();
+                });
+            }
+            _generationPlan = null;
+            _generationCancellation?.Dispose();
+            _generationCancellation = null;
             ReleaseStaticTextures();
             if (recipe != null && recipe != _transientRecipe) AssetDatabase.SaveAssetIfDirty(recipe);
             if (_transientRecipe != null) DestroyImmediate(_transientRecipe);
@@ -143,6 +178,7 @@ namespace TexturePackEditor
         {
             EnsureRecipe();
             HandleKeyboard();
+            DrawGenerationProgress();
             using (new EditorGUILayout.HorizontalScope())
             {
                 leftColumnWidth = Mathf.Clamp(leftColumnWidth, 220, Mathf.Max(220, position.width - 520));
@@ -151,6 +187,21 @@ namespace TexturePackEditor
                 using (new EditorGUILayout.VerticalScope(GUILayout.ExpandWidth(true))) DrawCenterColumn();
                 DrawSeparator();
                 using (new EditorGUILayout.VerticalScope(GUILayout.Width(220))) DrawToolsColumn();
+            }
+        }
+
+        private void DrawGenerationProgress()
+        {
+            if (!_generationActive) return;
+            Rect row = EditorGUILayout.GetControlRect(false, 24);
+            Rect cancel = new(row.xMax - 25, row.y + 1, 24, row.height - 2);
+            Rect bar = new(row.x, row.y + 2, Mathf.Max(1, row.width - 30), row.height - 4);
+            EditorGUI.ProgressBar(bar, Mathf.Clamp01(_generationProgress),
+                string.IsNullOrEmpty(_generationStatus) ? "Preparing…" : _generationStatus);
+            if (GUI.Button(cancel, EditorGUIUtility.IconContent("d_winbtn_win_close"), EditorStyles.miniButton))
+            {
+                _generationStatus = "Cancelling…";
+                _generationCancellation?.Cancel();
             }
         }
 
@@ -189,7 +240,7 @@ namespace TexturePackEditor
 
             using (new EditorGUILayout.HorizontalScope())
             {
-                using (new EditorGUI.DisabledScope(recipe == _transientRecipe || anchor == null))
+                using (new EditorGUI.DisabledScope(_generationActive || recipe == _transientRecipe || anchor == null))
                 {
                     if (GUILayout.Button("Generate Tab")) Generate(false);
                     if (GUILayout.Button("Generate All")) Generate(true);
@@ -989,25 +1040,145 @@ namespace TexturePackEditor
 
         private void Generate(bool all)
         {
+            if (_generationActive) return;
             try
             {
-                string suffix = EditorPrefs.GetString(SuffixKey, "_Wet");
                 int start = all ? 0 : activeOutput;
                 int end = all ? recipe.outputs.Count : activeOutput + 1;
-                string lastPath = null;
-                for (int output = start; output < end; output++)
-                    lastPath = TexturePackProcessor.Bake(recipe, output, anchor, suffix);
-                if (lastPath != null)
-                {
-                    EditorGUIUtility.PingObject(AssetDatabase.LoadAssetAtPath<Texture2D>(lastPath));
-                    ShowNotification(new GUIContent("Generated " + (end - start) + " texture(s)"));
-                }
+                _generationOutputs = Enumerable.Range(start, end - start).ToArray();
+                _generationOutputSnapshots = _generationOutputs
+                    .Select(output => recipe.outputs[output].Clone(true)).ToArray();
+                _generationRecipe = recipe;
+                _generationAnchor = anchor;
+                _generationSuffix = EditorPrefs.GetString(SuffixKey, "_Wet");
+                _generationOutputPosition = 0;
+                _generationProgress = 0;
+                _generationStatus = "Preparing…";
+                _generationLastPath = null;
+                _generationActive = true;
+                _generationCancellation = new CancellationTokenSource();
+                EditorApplication.delayCall -= StartNextGenerationOutput;
+                EditorApplication.delayCall += StartNextGenerationOutput;
+                Repaint();
             }
             catch (Exception exception)
+            {
+                FinishGeneration(exception);
+            }
+        }
+
+        private void StartNextGenerationOutput()
+        {
+            if (!_generationActive) return;
+            if (_generationCancellation == null || _generationCancellation.IsCancellationRequested)
+            {
+                FinishGeneration(cancelled: true);
+                return;
+            }
+            if (_generationOutputs == null || _generationOutputPosition >= _generationOutputs.Length)
+            {
+                FinishGeneration();
+                return;
+            }
+            try
+            {
+                int outputIndex = _generationOutputs[_generationOutputPosition];
+                TexturePackOutput outputSnapshot = _generationOutputSnapshots[_generationOutputPosition];
+                string outputName = outputSnapshot.name;
+                _generationStatus = "Reading sources for " + outputName + "…";
+                Repaint();
+                _generationPlan = TexturePackProcessor.PrepareBake(_generationRecipe, outputIndex,
+                    _generationAnchor, _generationSuffix, outputSnapshot);
+                int position = _generationOutputPosition;
+                int count = _generationOutputs.Length;
+                CancellationToken cancellation = _generationCancellation.Token;
+                TexturePackBakePlan plan = _generationPlan;
+                _generationTask = Task.Run(() => TexturePackProcessor.ExecuteBake(plan, localProgress =>
+                {
+                    _generationUpdates.Enqueue(new GenerationProgress
+                    {
+                        value = (position + localProgress) / count,
+                        status = (localProgress < .86f ? "Packing " : "Writing ") + outputName + "…"
+                    });
+                }, cancellation), cancellation);
+            }
+            catch (Exception exception)
+            {
+                FinishGeneration(exception);
+            }
+        }
+
+        private void GenerationUpdate()
+        {
+            while (_generationUpdates.TryDequeue(out GenerationProgress progress))
+            {
+                _generationProgress = progress.value;
+                _generationStatus = progress.status;
+                Repaint();
+            }
+            if (_generationTask == null || !_generationTask.IsCompleted) return;
+            Task completed = _generationTask;
+            _generationTask = null;
+            try
+            {
+                completed.GetAwaiter().GetResult();
+                if (_generationCancellation == null || _generationCancellation.IsCancellationRequested)
+                {
+                    FinishGeneration(cancelled: true);
+                    return;
+                }
+                _generationStatus = "Importing " + Path.GetFileName(_generationPlan.OutputPath) + "…";
+                _generationProgress = (_generationOutputPosition + .99f) / _generationOutputs.Length;
+                Repaint();
+                _generationLastPath = TexturePackProcessor.CompleteBake(_generationPlan, _generationRecipe);
+                _generationPlan.Dispose();
+                _generationPlan = null;
+                _generationOutputPosition++;
+                if (_generationOutputPosition >= _generationOutputs.Length) FinishGeneration();
+                else
+                {
+                    EditorApplication.delayCall -= StartNextGenerationOutput;
+                    EditorApplication.delayCall += StartNextGenerationOutput;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                FinishGeneration(cancelled: true);
+            }
+            catch (Exception exception)
+            {
+                FinishGeneration(exception);
+            }
+        }
+
+        private void FinishGeneration(Exception exception = null, bool cancelled = false)
+        {
+            EditorApplication.delayCall -= StartNextGenerationOutput;
+            _generationPlan?.Dispose();
+            _generationPlan = null;
+            _generationTask = null;
+            _generationCancellation?.Dispose();
+            _generationCancellation = null;
+            int generatedCount = _generationOutputPosition;
+            _generationOutputs = null;
+            _generationOutputSnapshots = null;
+            _generationRecipe = null;
+            _generationAnchor = null;
+            _generationSuffix = null;
+            _generationActive = false;
+            while (_generationUpdates.TryDequeue(out GenerationProgress ignored)) { }
+            if (exception != null)
             {
                 Debug.LogException(exception);
                 EditorUtility.DisplayDialog("Texture Pack Editor", exception.Message, "OK");
             }
+            else if (cancelled) ShowNotification(new GUIContent("Texture generation cancelled"));
+            else if (_generationLastPath != null)
+            {
+                EditorGUIUtility.PingObject(AssetDatabase.LoadAssetAtPath<Texture2D>(_generationLastPath));
+                ShowNotification(new GUIContent("Generated " + generatedCount + " texture(s)"));
+            }
+            Repaint();
         }
 
         private void Changed(int channelMask = 15)
@@ -1029,6 +1200,7 @@ namespace TexturePackEditor
 
         private void PreviewUpdate()
         {
+            GenerationUpdate();
             while (_previewUpdates.TryDequeue(out TexturePackPreviewUpdate update))
                 if (update.revision == _previewRevision) ApplyPreviewUpdate(update);
 
