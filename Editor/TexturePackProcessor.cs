@@ -186,7 +186,7 @@ namespace TexturePackEditor
 
     public static class TexturePackProcessor
     {
-        private const string GeneratedMarker = "TexturePackEditorRecipe:";
+        internal const string GeneratedMarker = "TexturePackEditorRecipe:";
 
         public static float Evaluate(IReadOnlyList<TexturePackNode> nodes, int lastNode,
             TexturePackPixelSession session, int pixel)
@@ -299,9 +299,11 @@ namespace TexturePackEditor
             if (outputIndex < 0 || outputIndex >= recipe.outputs.Count)
                 throw new ArgumentOutOfRangeException(nameof(outputIndex));
             TexturePackOutput output = outputSnapshot ?? recipe.outputs[outputIndex];
-            TexturePackSourceSet sources = TexturePackSourceSet.Detect(anchor);
-            Texture2D outputBase = sources.ResolveRole(output.outputBaseRole);
-            if (outputBase == null) throw new InvalidOperationException("Output-base role is unresolved: " + output.outputBaseRole);
+            TexturePackSourceSet sources = TexturePackSourceSet.Detect(anchor, recipe);
+            string outputRole = recipe.EffectiveOutputRole(output);
+            Texture2D outputBase = sources.ResolveRole(outputRole);
+            if (outputBase == null) throw new InvalidOperationException("Output-base role is unresolved: " +
+                                                                        TexturePackProjectSettings.instance.DisplayName(outputRole));
             string basePath = AssetDatabase.GetAssetPath(outputBase);
             string baseName = string.IsNullOrWhiteSpace(output.outputFileName)
                 ? Path.GetFileNameWithoutExtension(basePath)

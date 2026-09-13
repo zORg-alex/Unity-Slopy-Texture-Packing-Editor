@@ -20,6 +20,7 @@ namespace TexturePackEditor
 
         public TexturePackSourceKind sourceKind;
         public string sourceRole;
+        public string sourceRoleId;
         public Texture2D manualTexture;
         public int channelMask = 1;
 
@@ -55,6 +56,7 @@ namespace TexturePackEditor
             {
                 id = preserveId ? id : Guid.NewGuid().ToString("N"),
                 type = type, expanded = expanded, sourceKind = sourceKind, sourceRole = sourceRole,
+                sourceRoleId = sourceRoleId,
                 manualTexture = manualTexture, channelMask = channelMask,
                 desaturateAmount = desaturateAmount, desaturateBlack = desaturateBlack,
                 desaturateWhite = desaturateWhite, luminanceRed = luminanceRed, luminanceGreen = luminanceGreen,
@@ -85,6 +87,7 @@ namespace TexturePackEditor
         public string id = Guid.NewGuid().ToString("N");
         public string name;
         public string outputBaseRole;
+        public string outputBaseRoleId;
         [Tooltip("Optional file name without an extension. Empty uses the base texture name.")]
         public string outputFileName;
         public List<TexturePackChannelStack> channels = new();
@@ -102,7 +105,8 @@ namespace TexturePackEditor
             var output = new TexturePackOutput
             {
                 name = string.IsNullOrWhiteSpace(displayName) ? role : displayName,
-                outputBaseRole = role
+                outputBaseRole = role,
+                outputBaseRoleId = role
             };
             output.EnsureChannels();
             for (int channel = 0; channel < 4; channel++)
@@ -111,6 +115,7 @@ namespace TexturePackEditor
                     type = TexturePackNodeType.Sample,
                     sourceKind = TexturePackSourceKind.DetectedRole,
                     sourceRole = role ?? sourceSet?.AnchorRole,
+                    sourceRoleId = role ?? sourceSet?.AnchorRole,
                     channelMask = 1 << channel
                 });
             return output;
@@ -123,6 +128,7 @@ namespace TexturePackEditor
                 id = preserveIds ? id : Guid.NewGuid().ToString("N"),
                 name = name,
                 outputBaseRole = outputBaseRole,
+                outputBaseRoleId = outputBaseRoleId,
                 outputFileName = outputFileName,
                 channels = channels.Select(stack => new TexturePackChannelStack
                 {
@@ -135,11 +141,14 @@ namespace TexturePackEditor
 
     public sealed class TexturePackRecipe : ScriptableObject
     {
+        private const int CurrentRoleSchema = 1;
         public List<TexturePackOutput> outputs = new();
         public string outputBaseRole;
         public List<Texture2D> manualSources = new();
+        public List<TexturePackRoleOverride> roleOverrides = new();
         public List<TexturePackChannelStack> channels = new();
         [HideInInspector] public string lastGeneratedPath;
+        [HideInInspector] public int roleSchemaVersion;
 
         public void EnsureChannels()
         {
@@ -151,6 +160,7 @@ namespace TexturePackEditor
             outputs ??= new List<TexturePackOutput>();
             channels ??= new List<TexturePackChannelStack>();
             manualSources ??= new List<Texture2D>();
+            roleOverrides ??= new List<TexturePackRoleOverride>();
             if (outputs.Count == 0)
             {
                 var migrated = new TexturePackOutput
@@ -163,6 +173,19 @@ namespace TexturePackEditor
                 outputs.Add(migrated);
             }
             foreach (var output in outputs) output.EnsureChannels();
+            if (roleSchemaVersion < CurrentRoleSchema)
+            {
+                foreach (TexturePackOutput output in outputs)
+                {
+                    output.outputBaseRoleId = EffectiveOutputRole(output);
+                    foreach (TexturePackNode node in output.channels.SelectMany(channel => channel.nodes))
+                        if (node.type == TexturePackNodeType.Sample &&
+                            node.sourceKind == TexturePackSourceKind.DetectedRole)
+                            node.sourceRoleId = EffectiveRole(node);
+                }
+                roleSchemaVersion = CurrentRoleSchema;
+                if (EditorUtility.IsPersistent(this)) EditorUtility.SetDirty(this);
+            }
             // Keep the original fields synchronized for recipes created by the first version.
             outputBaseRole = outputs[0].outputBaseRole;
             channels = outputs[0].channels;
@@ -181,30 +204,81 @@ namespace TexturePackEditor
             source.EnsureOutputs();
             outputs = source.outputs.Select(output => output.Clone()).ToList();
             manualSources = new List<Texture2D>(source.manualSources);
+            roleOverrides = source.roleOverrides.Select(rule => new TexturePackRoleOverride
+            {
+                roleId = rule.roleId, mode = rule.mode, matchMode = rule.matchMode, expression = rule.expression
+            }).ToList();
+            roleSchemaVersion = source.roleSchemaVersion;
             EnsureOutputs();
+        }
+
+        public TexturePackRoleOverride RoleOverride(string roleId)
+        {
+            roleOverrides ??= new List<TexturePackRoleOverride>();
+            return roleOverrides.FirstOrDefault(rule =>
+                string.Equals(rule.roleId, roleId, StringComparison.OrdinalIgnoreCase));
+        }
+
+        public string EffectiveRole(TexturePackNode node)
+            => !string.IsNullOrEmpty(node.sourceRoleId) ? node.sourceRoleId :
+                TexturePackRoleMatcher.ResolveLegacy(node.sourceRole, this);
+
+        public string EffectiveOutputRole(TexturePackOutput output)
+        {
+            if (!string.IsNullOrEmpty(output.outputBaseRoleId)) return output.outputBaseRoleId;
+            string namedRole = TexturePackRoleMatcher.ResolveLegacy(output.name, this);
+            return !string.IsNullOrEmpty(namedRole) ? namedRole :
+                TexturePackRoleMatcher.ResolveLegacy(output.outputBaseRole, this);
         }
     }
 
     public sealed class TexturePackSourceSet
     {
+        private const string SuffixKey = "TexturePackEditor.SafeOutputSuffix";
         public string Folder { get; private set; }
         public string Prefix { get; private set; }
+        public string FamilyKey => (Folder ?? string.Empty) + "/" + (Prefix ?? string.Empty);
         public string AnchorRole { get; private set; }
         public IReadOnlyDictionary<string, Texture2D> Detected => _detected;
+        public IReadOnlyDictionary<string, List<Texture2D>> Conflicts => _conflicts;
+        public bool HasUnresolvedConflicts => _conflicts.Keys.Any(role => !_detected.ContainsKey(role));
+        public IReadOnlyList<Texture2D> Unmatched => _unmatched;
+        public IReadOnlyList<string> Errors => _errors;
         private readonly Dictionary<string, Texture2D> _detected = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, List<Texture2D>> _conflicts = new(StringComparer.OrdinalIgnoreCase);
+        private readonly List<Texture2D> _unmatched = new();
+        private readonly List<string> _errors = new();
+        private TexturePackRecipe _recipe;
 
-        public static TexturePackSourceSet Detect(Texture2D anchor)
+        public static TexturePackSourceSet Detect(Texture2D anchor, TexturePackRecipe recipe = null)
         {
             var set = new TexturePackSourceSet();
+            set._recipe = recipe;
             if (anchor == null) return set;
             string path = AssetDatabase.GetAssetPath(anchor);
             set.Folder = Path.GetDirectoryName(path)?.Replace('\\', '/');
             string stem = Path.GetFileNameWithoutExtension(path);
+            string suffix = EditorPrefs.GetString(SuffixKey, "_Wet");
+            if (IsGenerated(path, stem, suffix))
+            {
+                string originalStem = stem.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)
+                    ? stem.Substring(0, stem.Length - suffix.Length) : stem;
+                Texture2D original = FindExactTexture(set.Folder, originalStem);
+                if (original != null)
+                {
+                    anchor = original;
+                    path = AssetDatabase.GetAssetPath(anchor);
+                    stem = Path.GetFileNameWithoutExtension(path);
+                }
+            }
             int separator = stem.LastIndexOf('_');
             set.Prefix = separator > 0 ? stem.Substring(0, separator) : stem;
-            set.AnchorRole = separator > 0 ? stem.Substring(separator + 1) : stem;
+            string anchorRawRole = separator > 0 ? stem.Substring(separator + 1) : stem;
+            set.AnchorRole = TexturePackRoleMatcher.Match(anchorRawRole, recipe, out string anchorError);
+            if (!string.IsNullOrEmpty(anchorError)) set._errors.Add(anchor.name + ": " + anchorError);
             if (string.IsNullOrEmpty(set.Folder)) return set;
             string rolePrefix = set.Prefix + "_";
+            var assignments = new Dictionary<string, List<Texture2D>>(StringComparer.OrdinalIgnoreCase);
             foreach (string guid in AssetDatabase.FindAssets("t:Texture2D", new[] { set.Folder }))
             {
                 string candidatePath = AssetDatabase.GUIDToAssetPath(guid);
@@ -212,18 +286,41 @@ namespace TexturePackEditor
                         StringComparison.OrdinalIgnoreCase)) continue;
                 string candidateStem = Path.GetFileNameWithoutExtension(candidatePath);
                 if (!candidateStem.StartsWith(rolePrefix, StringComparison.OrdinalIgnoreCase)) continue;
-                string role = candidateStem.Substring(rolePrefix.Length);
+                if (IsGenerated(candidatePath, candidateStem, suffix)) continue;
+                string rawRole = candidateStem.Substring(rolePrefix.Length);
                 var texture = AssetDatabase.LoadAssetAtPath<Texture2D>(candidatePath);
-                if (texture != null && !set._detected.ContainsKey(role)) set._detected.Add(role, texture);
+                if (texture == null) continue;
+                string role = TexturePackRoleMatcher.Match(rawRole, recipe, out string error);
+                if (!string.IsNullOrEmpty(error)) set._errors.Add(texture.name + ": " + error);
+                if (string.IsNullOrEmpty(role))
+                {
+                    set._unmatched.Add(texture);
+                    continue;
+                }
+                if (!assignments.TryGetValue(role, out List<Texture2D> textures))
+                    assignments.Add(role, textures = new List<Texture2D>());
+                textures.Add(texture);
             }
-            if (!set._detected.ContainsKey(set.AnchorRole)) set._detected[set.AnchorRole] = anchor;
+            foreach (var pair in assignments)
+            {
+                if (pair.Value.Count == 1) set._detected.Add(pair.Key, pair.Value[0]);
+                else
+                {
+                    set._conflicts.Add(pair.Key, pair.Value);
+                    Texture2D selected = TexturePackSessionBindings.Get(set.FamilyKey, pair.Key);
+                    if (selected != null && pair.Value.Contains(selected)) set._detected.Add(pair.Key, selected);
+                }
+            }
             return set;
         }
 
         public Texture2D Resolve(TexturePackNode node)
         {
             if (node.sourceKind == TexturePackSourceKind.ManualTexture) return node.manualTexture;
-            return node.sourceRole != null && _detected.TryGetValue(node.sourceRole, out var texture) ? texture : null;
+            string role = _recipe != null ? _recipe.EffectiveRole(node) :
+                !string.IsNullOrEmpty(node.sourceRoleId) ? node.sourceRoleId :
+                TexturePackRoleMatcher.ResolveLegacy(node.sourceRole, null);
+            return role != null && _detected.TryGetValue(role, out var texture) ? texture : null;
         }
 
         public Texture2D ResolveRole(string role)
@@ -232,5 +329,26 @@ namespace TexturePackEditor
         }
 
         public string[] SortedRoles() => _detected.Keys.OrderBy(role => role).ToArray();
+
+        private static bool IsGenerated(string path, string stem, string suffix)
+        {
+            var importer = AssetImporter.GetAtPath(path);
+            return (!string.IsNullOrEmpty(importer?.userData) &&
+                    importer.userData.StartsWith(TexturePackProcessor.GeneratedMarker, StringComparison.Ordinal)) ||
+                   (!string.IsNullOrEmpty(suffix) && stem.EndsWith(suffix, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static Texture2D FindExactTexture(string folder, string stem)
+        {
+            if (string.IsNullOrEmpty(folder)) return null;
+            foreach (string guid in AssetDatabase.FindAssets(stem + " t:Texture2D", new[] { folder }))
+            {
+                string candidate = AssetDatabase.GUIDToAssetPath(guid);
+                if (string.Equals(Path.GetFileNameWithoutExtension(candidate), stem,
+                        StringComparison.OrdinalIgnoreCase))
+                    return AssetDatabase.LoadAssetAtPath<Texture2D>(candidate);
+            }
+            return null;
+        }
     }
 }

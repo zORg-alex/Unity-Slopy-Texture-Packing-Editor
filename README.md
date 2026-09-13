@@ -1,8 +1,8 @@
 # Texture Pack Editor
 
-Open `Tools > Texture Pack Editor`, then select an anchor texture. Textures in the same folder whose
-filenames share the anchor's prefix are exposed as detected sampler sources. Additional textures can be
-added manually.
+Open `Tools > Texture Pack Editor` to use the currently selected texture as the initial anchor. Later Project
+selection changes do not change the editor. Drag another texture into the anchor field, or use the refresh
+button to adopt the current Project selection and rescan its family. Additional textures can be added manually.
 
 The window uses three columns: texture sources and generation settings, tabbed outputs with compact R/G/B/A
 stacks, and a tool shelf. Create a recipe asset before generating. Each output channel is an independent,
@@ -11,7 +11,7 @@ collapsed channel header; dropping on a header opens it. Drag nodes or selected 
 Shift-click selects a range, Ctrl/Cmd-click toggles selection, Ctrl/Cmd-C and Ctrl/Cmd-V copy and paste,
 and Delete removes selected nodes. Node settings and the preview beside each node can be collapsed.
 
-Use the `+` output tab to create an output based on any detected map or a custom output. An optional file
+Use the `+` output tab to create an output based on any configured semantic role or a custom output. An optional file
 name can be set per output; otherwise generation keeps the base texture's file name. Preview pixels and
 Levels histograms are processed by one background job at a time after a short edit debounce. Unity texture
 capture and preview texture creation remain on the Editor thread.
@@ -30,8 +30,15 @@ remain on the Editor thread because Unity does not expose those operations as th
 Packing is distributed across roughly three quarters of the available logical processors so the Editor remains
 responsive. Prepared sampler nodes read captured pixel buffers directly instead of hashing an ID per pixel.
 
-Recipes store detected sources by filename role (the part after the shared prefix), allowing the same stacks
-to be applied to another similarly named texture set. Manual sources remain direct asset references.
+Detected textures are assigned semantic roles such as Basemap, MaskMap, Normal, and Specular. The settings
+button beside the anchor edits the project-wide role catalog. Literal rules are case-insensitive `|`-separated
+contained terms; advanced roles can use regular expressions. Longest matches win, while tied matches and
+multiple textures assigned to one role remain unresolved until the rules or session binding are corrected.
+
+Recipes store stable semantic role IDs rather than texture naming conventions. A recipe can add terms to a
+project role or override its rule entirely. Changing texture families therefore never rewrites the recipe.
+Generated outputs are excluded from source detection, and selecting an owned suffixed output resolves back to
+its original texture family. Manual sampler sources remain direct asset references.
 
 Desaturate defaults to linear Rec.709 luminance: R 0.2126, G 0.7152, B 0.0722. Green contributes most to
 perceived brightness, followed by red and then blue. Its colored weight rails, amount, and two-point output

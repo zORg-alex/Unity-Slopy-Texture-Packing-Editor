@@ -104,6 +104,11 @@ namespace TexturePackEditor
             var window = GetWindow<TexturePackEditorWindow>();
             window.titleContent = new GUIContent("Texture Pack Editor");
             window.minSize = new Vector2(1040, 600);
+            if (Selection.activeObject is Texture2D selected)
+            {
+                window.anchor = selected;
+                window.RefreshSourceSet(window.recipe == window._transientRecipe);
+            }
             window.Show();
         }
 
@@ -119,16 +124,13 @@ namespace TexturePackEditor
 
         private void OnEnable()
         {
-            Selection.selectionChanged += OnProjectSelectionChanged;
             EditorApplication.update += PreviewUpdate;
-            if (anchor == null && Selection.activeObject is Texture2D selected) anchor = selected;
             EnsureRecipe();
             RefreshSourceSet(false);
         }
 
         private void OnDisable()
         {
-            Selection.selectionChanged -= OnProjectSelectionChanged;
             EditorApplication.update -= PreviewUpdate;
             EditorApplication.delayCall -= StartNextGenerationOutput;
             _previewCancellation?.Cancel();
@@ -167,14 +169,6 @@ namespace TexturePackEditor
             if (_transientRecipe != null) DestroyImmediate(_transientRecipe);
         }
 
-        private void OnProjectSelectionChanged()
-        {
-            if (Selection.activeObject is not Texture2D selected || selected == anchor) return;
-            anchor = selected;
-            RefreshSourceSet(recipe == _transientRecipe);
-            Repaint();
-        }
-
         private void OnGUI()
         {
             EnsureRecipe();
@@ -209,12 +203,30 @@ namespace TexturePackEditor
         private void DrawLeftColumn()
         {
             EditorGUILayout.LabelField("Texture Set", EditorStyles.boldLabel);
-            EditorGUI.BeginChangeCheck();
-            Texture2D nextAnchor = (Texture2D)EditorGUILayout.ObjectField(anchor, typeof(Texture2D), false);
-            if (EditorGUI.EndChangeCheck())
+            using (new EditorGUILayout.HorizontalScope())
             {
-                anchor = nextAnchor;
-                RefreshSourceSet(recipe == _transientRecipe);
+                EditorGUI.BeginChangeCheck();
+                Texture2D nextAnchor = (Texture2D)EditorGUILayout.ObjectField(anchor, typeof(Texture2D), false);
+                if (EditorGUI.EndChangeCheck())
+                {
+                    anchor = nextAnchor;
+                    RefreshSourceSet(recipe == _transientRecipe);
+                }
+                GUIContent refresh = EditorGUIUtility.IconContent("d_Refresh");
+                refresh.tooltip = "Use the selected Project texture, or rescan the current texture set.";
+                if (GUILayout.Button(refresh, EditorStyles.miniButton, GUILayout.Width(26), GUILayout.Height(20)))
+                {
+                    if (Selection.activeObject is Texture2D selected) anchor = selected;
+                    RefreshSourceSet(recipe == _transientRecipe);
+                }
+                GUIContent settings = EditorGUIUtility.IconContent("d_Settings");
+                settings.tooltip = "Edit project roles and recipe overrides.";
+                if (GUILayout.Button(settings, EditorStyles.miniButton, GUILayout.Width(26), GUILayout.Height(20)))
+                    TexturePackRoleSettingsWindow.Open(anchor, recipe == _transientRecipe ? null : recipe, () =>
+                    {
+                        RefreshSourceSet(false);
+                        Repaint();
+                    });
             }
 
             using (new EditorGUILayout.HorizontalScope())
@@ -228,7 +240,7 @@ namespace TexturePackEditor
                     recipe.EnsureOutputs();
                     activeOutput = 0;
                     SelectFinalPreview();
-                    Changed();
+                    RefreshSourceSet(false);
                 }
                 string label = recipe == _transientRecipe ? "Save…" : "Copy…";
                 if (GUILayout.Button(label, GUILayout.Width(54))) SaveRecipeCopy();
@@ -239,13 +251,16 @@ namespace TexturePackEditor
             suffix = EditorGUILayout.TextField("Safe suffix", suffix);
             if (EditorGUI.EndChangeCheck()) EditorPrefs.SetString(SuffixKey, suffix);
 
+            bool canGenerateTab = !_generationActive && recipe != _transientRecipe && anchor != null &&
+                                  IsOutputResolved(ActiveOutput);
+            bool canGenerateAny = !_generationActive && recipe != _transientRecipe && anchor != null &&
+                                  recipe.outputs.Any(IsOutputResolved);
             using (new EditorGUILayout.HorizontalScope())
             {
-                using (new EditorGUI.DisabledScope(_generationActive || recipe == _transientRecipe || anchor == null))
-                {
+                using (new EditorGUI.DisabledScope(!canGenerateTab))
                     if (GUILayout.Button("Generate Tab")) Generate(false);
+                using (new EditorGUI.DisabledScope(!canGenerateAny))
                     if (GUILayout.Button("Generate All")) Generate(true);
-                }
             }
             EditorGUILayout.Space(4);
             EditorGUILayout.LabelField("Sources", EditorStyles.boldLabel);
@@ -255,12 +270,19 @@ namespace TexturePackEditor
                 GUILayout.MaxHeight(sourceHeight));
             if (_sourceSet != null)
                 foreach (var pair in _sourceSet.Detected.OrderBy(pair => pair.Key))
-                    DrawSourceCard(pair.Value, TexturePackSourceKind.DetectedRole, pair.Key, pair.Key, false);
+                    DrawSourceCard(pair.Value, TexturePackSourceKind.DetectedRole, pair.Key,
+                        TexturePackProjectSettings.instance.DisplayName(pair.Key), false);
             foreach (Texture2D texture in recipe.manualSources.ToArray())
                 DrawSourceCard(texture, TexturePackSourceKind.ManualTexture, null,
                     texture == null ? "Missing" : texture.name, true);
             DrawEmptySourceCard();
             EditorGUILayout.EndScrollView();
+
+            if (_sourceSet?.HasUnresolvedConflicts == true)
+                EditorGUILayout.HelpBox("Some roles have conflicting textures. Open Role Settings to choose one.",
+                    MessageType.Warning);
+            foreach (string error in _sourceSet?.Errors ?? Array.Empty<string>())
+                EditorGUILayout.HelpBox(error, MessageType.Warning);
 
             DrawLargePreview();
             if (!string.IsNullOrEmpty(_previewError)) EditorGUILayout.HelpBox(_previewError, MessageType.Warning);
@@ -468,12 +490,13 @@ namespace TexturePackEditor
                     output.name = EditorGUILayout.TextField("Name", output.name);
                     if (EditorGUI.EndChangeCheck()) MarkRecipeDirty();
 
-                    string[] roles = _sourceSet?.SortedRoles() ?? Array.Empty<string>();
-                    int index = Mathf.Max(0, Array.IndexOf(roles, output.outputBaseRole));
                     EditorGUI.BeginChangeCheck();
-                    index = EditorGUILayout.Popup("Base", index, roles);
-                    if (roles.Length > 0) output.outputBaseRole = roles[Mathf.Clamp(index, 0, roles.Length - 1)];
-                    if (EditorGUI.EndChangeCheck()) Changed();
+                    string outputRole = DrawRolePopup("Base", recipe.EffectiveOutputRole(output));
+                    if (EditorGUI.EndChangeCheck())
+                    {
+                        output.outputBaseRoleId = outputRole;
+                        Changed();
+                    }
                 }
                 EditorGUI.BeginChangeCheck();
                 output.outputFileName = EditorGUILayout.TextField(
@@ -523,11 +546,11 @@ namespace TexturePackEditor
         private void ShowAddOutputMenu()
         {
             var menu = new GenericMenu();
-            string[] roles = _sourceSet?.SortedRoles() ?? Array.Empty<string>();
-            foreach (string role in roles)
+            foreach (TexturePackRoleDefinition role in TexturePackProjectSettings.instance.Roles)
             {
-                string captured = role;
-                menu.AddItem(new GUIContent(captured), false, () => AddOutput(captured, captured));
+                string roleId = role.id;
+                string roleName = role.name;
+                menu.AddItem(new GUIContent(roleName), false, () => AddOutput(roleId, roleName));
             }
             menu.AddSeparator("");
             menu.AddItem(new GUIContent("Custom"), false, () => AddOutput(
@@ -687,10 +710,8 @@ namespace TexturePackEditor
             node.sourceKind = (TexturePackSourceKind)EditorGUILayout.EnumPopup("Source", node.sourceKind);
             if (node.sourceKind == TexturePackSourceKind.DetectedRole)
             {
-                string[] roles = _sourceSet?.SortedRoles() ?? Array.Empty<string>();
-                int role = Mathf.Max(0, Array.IndexOf(roles, node.sourceRole));
-                role = EditorGUILayout.Popup("Texture", role, roles);
-                if (roles.Length > 0) node.sourceRole = roles[Mathf.Clamp(role, 0, roles.Length - 1)];
+                string role = DrawRolePopup("Texture", recipe.EffectiveRole(node));
+                if (role != recipe.EffectiveRole(node)) node.sourceRoleId = role;
             }
             else node.manualTexture = (Texture2D)EditorGUILayout.ObjectField("Texture", node.manualTexture, typeof(Texture2D), false);
             using (new EditorGUILayout.HorizontalScope())
@@ -706,6 +727,51 @@ namespace TexturePackEditor
                 }
             }
             if (node.channelMask == 0) EditorGUILayout.HelpBox("Enable at least one channel.", MessageType.Warning);
+        }
+
+        private string DrawRolePopup(string label, string roleId)
+        {
+            IReadOnlyList<TexturePackRoleDefinition> roles = TexturePackProjectSettings.instance.Roles;
+            if (roles.Count == 0)
+            {
+                EditorGUILayout.LabelField(label, "No roles configured");
+                return roleId;
+            }
+            int current = -1;
+            var roleLabels = new GUIContent[roles.Count];
+            for (int index = 0; index < roles.Count; index++)
+            {
+                TexturePackRoleDefinition role = roles[index];
+                if (string.Equals(role.id, roleId, StringComparison.OrdinalIgnoreCase)) current = index;
+                bool resolved = _sourceSet?.ResolveRole(role.id) != null;
+                roleLabels[index] = new GUIContent(resolved ? role.name : role.name + " (missing)");
+            }
+            if (current >= 0)
+            {
+                int next = EditorGUILayout.Popup(new GUIContent(label), current, roleLabels);
+                return next == current ? roleId : roles[Mathf.Clamp(next, 0, roles.Count - 1)].id;
+            }
+            var missingLabels = new GUIContent[roleLabels.Length + 1];
+            missingLabels[0] = new GUIContent("Missing: " + (string.IsNullOrEmpty(roleId) ? "unassigned" : roleId));
+            Array.Copy(roleLabels, 0, missingLabels, 1, roleLabels.Length);
+            int selected = EditorGUILayout.Popup(new GUIContent(label), 0, missingLabels);
+            return selected == 0 ? roleId : roles[selected - 1].id;
+        }
+
+        private bool IsOutputResolved(TexturePackOutput output)
+        {
+            if (_sourceSet == null || output == null) return false;
+            if (_sourceSet.ResolveRole(recipe.EffectiveOutputRole(output)) == null) return false;
+            foreach (TexturePackNode node in output.channels.SelectMany(channel => channel.nodes))
+            {
+                if (node.type != TexturePackNodeType.Sample) continue;
+                if (node.sourceKind == TexturePackSourceKind.ManualTexture)
+                {
+                    if (node.manualTexture == null) return false;
+                }
+                else if (_sourceSet.ResolveRole(recipe.EffectiveRole(node)) == null) return false;
+            }
+            return true;
         }
 
         private void DrawDesaturateSettings(TexturePackNode node)
@@ -801,7 +867,7 @@ namespace TexturePackEditor
             Rect drag = new(card.x, card.y, card.width, 27);
             var sample = new TexturePackNode
             {
-                type = TexturePackNodeType.Sample, sourceKind = kind, sourceRole = role,
+                type = TexturePackNodeType.Sample, sourceKind = kind, sourceRole = role, sourceRoleId = role,
                 manualTexture = texture, channelMask = mask
             };
             HandleDragSource(drag, new DragPayload { Node = sample }, "Sample " + title, null);
@@ -1019,7 +1085,7 @@ namespace TexturePackEditor
 
         private void RefreshSourceSet(bool reset)
         {
-            _sourceSet = TexturePackSourceSet.Detect(anchor);
+            _sourceSet = TexturePackSourceSet.Detect(anchor, recipe);
             EnsureRecipe();
             if (reset && anchor != null) recipe.ResetTo(_sourceSet);
             activeOutput = Mathf.Clamp(activeOutput, 0, recipe.outputs.Count - 1);
@@ -1046,9 +1112,11 @@ namespace TexturePackEditor
             if (_generationActive) return;
             try
             {
-                int start = all ? 0 : activeOutput;
-                int end = all ? recipe.outputs.Count : activeOutput + 1;
-                _generationOutputs = Enumerable.Range(start, end - start).ToArray();
+                _generationOutputs = all
+                    ? Enumerable.Range(0, recipe.outputs.Count).Where(index => IsOutputResolved(recipe.outputs[index])).ToArray()
+                    : new[] { activeOutput };
+                if (_generationOutputs.Length == 0)
+                    throw new InvalidOperationException("No outputs have all required roles resolved.");
                 _generationOutputSnapshots = _generationOutputs
                     .Select(output => recipe.outputs[output].Clone(true)).ToArray();
                 _generationRecipe = recipe;
@@ -1236,7 +1304,7 @@ namespace TexturePackEditor
             _previewError = null;
             try
             {
-                _sourceSet = TexturePackSourceSet.Detect(anchor);
+                _sourceSet = TexturePackSourceSet.Detect(anchor, recipe);
                 TexturePackOutput snapshot = ActiveOutput.Clone(true);
                 PrunePreviewCaches(snapshot);
                 int channelMask = _previewDirtyChannels == 0 ? 15 : _previewDirtyChannels;
@@ -1639,11 +1707,12 @@ namespace TexturePackEditor
             GUI.EndGroup();
         }
 
-        private static string NodeTitle(TexturePackNode node)
+        private string NodeTitle(TexturePackNode node)
         {
             if (node.type != TexturePackNodeType.Sample)
                 return node.type == TexturePackNodeType.MultiplyAdd ? "Multiply + Add" : node.type.ToString();
-            string source = node.sourceKind == TexturePackSourceKind.DetectedRole ? node.sourceRole :
+            string source = node.sourceKind == TexturePackSourceKind.DetectedRole
+                ? TexturePackProjectSettings.instance.DisplayName(recipe.EffectiveRole(node)) :
                 node.manualTexture == null ? "Missing" : node.manualTexture.name;
             return "Sample " + source + "." + MaskName(node.channelMask);
         }
@@ -1672,7 +1741,8 @@ namespace TexturePackEditor
         {
             Texture2D texture = _sourceSet?.Resolve(node);
             if (texture != null) return texture.name;
-            return node.sourceKind == TexturePackSourceKind.DetectedRole ? node.sourceRole : "?";
+            return node.sourceKind == TexturePackSourceKind.DetectedRole
+                ? TexturePackProjectSettings.instance.DisplayName(recipe.EffectiveRole(node)) : "?";
         }
 
         private static Color NodeColor(TexturePackNodeType type) => type switch
