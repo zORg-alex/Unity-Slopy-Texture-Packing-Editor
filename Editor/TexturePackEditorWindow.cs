@@ -25,6 +25,7 @@ namespace TexturePackEditor
         private static List<TexturePackNode> _clipboard = new();
         private static readonly Dictionary<string, Texture2D> GradientTextures = new();
         private static readonly Dictionary<int, GUIStyle> NodeHeaderStyles = new();
+        private static readonly Dictionary<int, GUIStyle> CollapsedNodeStyles = new();
         private static readonly Vector3[] HistogramPoints = new Vector3[256];
         private static GUIStyle _nodeContainerStyle;
         private static GUIStyle _nodeBodyStyle;
@@ -198,7 +199,7 @@ namespace TexturePackEditor
             Rect bar = new(row.x, row.y + 2, Mathf.Max(1, row.width - 30), row.height - 4);
             EditorGUI.ProgressBar(bar, Mathf.Clamp01(_generationProgress),
                 string.IsNullOrEmpty(_generationStatus) ? "Preparing…" : _generationStatus);
-            if (GUI.Button(cancel, EditorGUIUtility.IconContent("d_winbtn_win_close"), EditorStyles.miniButton))
+            if (GUI.Button(cancel, "×", EditorStyles.miniButton))
             {
                 _generationStatus = "Cancelling…";
                 _generationCancellation?.Cancel();
@@ -588,13 +589,15 @@ namespace TexturePackEditor
             float x = header.x + 58;
             foreach (TexturePackNode node in stack.nodes.Take(9))
             {
-                string icon = NodeIcon(node);
-                float width = Mathf.Min(70, GUI.skin.label.CalcSize(new GUIContent(icon)).x + 10);
+                string icon = CollapsedNodeLabel(node);
+                GUIContent content = new(icon, NodeTitle(node));
+                GUIStyle style = CollapsedNodeStyle(node.type);
+                float available = header.xMax - 70 - x;
+                if (available < 30) break;
+                float width = Mathf.Min(available, Mathf.Min(180, style.CalcSize(content).x + 12));
                 Rect pill = new(x, header.y + 8, width, 18);
-                EditorGUI.DrawRect(pill, NodeColor(node.type));
-                GUI.Label(pill, icon, new GUIStyle(EditorStyles.miniLabel) { alignment = TextAnchor.MiddleCenter });
+                GUI.Label(pill, content, style);
                 x += width + 4;
-                if (x > header.xMax - 70) break;
             }
         }
 
@@ -1338,6 +1341,9 @@ namespace TexturePackEditor
             foreach (GUIStyle style in NodeHeaderStyles.Values)
                 if (style?.normal.background != null) DestroyImmediate(style.normal.background);
             NodeHeaderStyles.Clear();
+            foreach (GUIStyle style in CollapsedNodeStyles.Values)
+                if (style?.normal.background != null) DestroyImmediate(style.normal.background);
+            CollapsedNodeStyles.Clear();
             _nodeContainerStyle = null;
             _nodeBodyStyle = null;
         }
@@ -1506,8 +1512,8 @@ namespace TexturePackEditor
 
         private static GUIStyle NodeContainerStyle => _nodeContainerStyle ??= new GUIStyle(EditorStyles.helpBox)
         {
-            padding = new RectOffset(0, 0, 0, 0),
-            margin = new RectOffset(2, 2, 2, 3)
+            padding = new RectOffset(1, 1, 1, 1),
+            margin = new RectOffset(1, 1, 1, 2)
         };
 
         private static GUIStyle NodeBodyStyle => _nodeBodyStyle ??= new GUIStyle
@@ -1520,11 +1526,11 @@ namespace TexturePackEditor
             int key = (int)type + (selected ? 100 : 0);
             if (NodeHeaderStyles.TryGetValue(key, out GUIStyle style)) return style;
             Color color = WithAlpha(NodeColor(type), selected ? .48f : .30f);
-            var texture = CreateRoundedTexture(color);
+            var texture = CreateRoundedTexture(color, 4, true);
             style = new GUIStyle
             {
                 normal = { background = texture },
-                border = new RectOffset(8, 8, 8, 8),
+                border = new RectOffset(5, 5, 5, 1),
                 padding = new RectOffset(0, 0, 0, 0),
                 margin = new RectOffset(0, 0, 0, 0)
             };
@@ -1532,16 +1538,34 @@ namespace TexturePackEditor
             return style;
         }
 
-        private static Texture2D CreateRoundedTexture(Color color)
+        private static GUIStyle CollapsedNodeStyle(TexturePackNodeType type)
         {
-            const int size = 18;
-            const int radius = 6;
+            int key = (int)type;
+            if (CollapsedNodeStyles.TryGetValue(key, out GUIStyle style)) return style;
+            var texture = CreateRoundedTexture(WithAlpha(NodeColor(type), .42f), 4, false);
+            style = new GUIStyle(EditorStyles.miniLabel)
+            {
+                normal = { background = texture },
+                border = new RectOffset(5, 5, 5, 5),
+                padding = new RectOffset(6, 6, 0, 0),
+                alignment = TextAnchor.MiddleCenter,
+                clipping = TextClipping.Clip
+            };
+            CollapsedNodeStyles[key] = style;
+            return style;
+        }
+
+        private static Texture2D CreateRoundedTexture(Color color, int radius, bool squareBottom)
+        {
+            const int size = 14;
             var pixels = new Color32[size * size];
             for (int y = 0; y < size; y++)
             for (int x = 0; x < size; x++)
             {
                 float nearestX = Mathf.Clamp(x + .5f, radius, size - radius);
-                float nearestY = Mathf.Clamp(y + .5f, radius, size - radius);
+                float nearestY = squareBottom
+                    ? Mathf.Min(y + .5f, size - radius)
+                    : Mathf.Clamp(y + .5f, radius, size - radius);
                 float distance = Vector2.Distance(new Vector2(x + .5f, y + .5f), new Vector2(nearestX, nearestY));
                 float coverage = Mathf.Clamp01(radius + .5f - distance);
                 Color pixel = color;
@@ -1636,13 +1660,20 @@ namespace TexturePackEditor
             _ => string.Empty
         };
 
-        private static string NodeIcon(TexturePackNode node) => node.type switch
+        private string CollapsedNodeLabel(TexturePackNode node) => node.type switch
         {
-            TexturePackNodeType.Sample => "S:" + (node.sourceKind == TexturePackSourceKind.DetectedRole
-                ? node.sourceRole : node.manualTexture == null ? "?" : node.manualTexture.name),
+            TexturePackNodeType.Sample => "Sample:" + SampleSourceName(node) + "." +
+                                          MaskName(node.channelMask).ToLowerInvariant(),
             TexturePackNodeType.Desaturate => "Desat", TexturePackNodeType.Levels => "Levels",
             TexturePackNodeType.MultiplyAdd => "× +", _ => node.type.ToString()
         };
+
+        private string SampleSourceName(TexturePackNode node)
+        {
+            Texture2D texture = _sourceSet?.Resolve(node);
+            if (texture != null) return texture.name;
+            return node.sourceKind == TexturePackSourceKind.DetectedRole ? node.sourceRole : "?";
+        }
 
         private static Color NodeColor(TexturePackNodeType type) => type switch
         {
