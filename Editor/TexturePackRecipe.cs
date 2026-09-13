@@ -46,6 +46,9 @@ namespace TexturePackEditor
         public float add;
         public float constant;
 
+        [NonSerialized] internal Color[] preparedPixels;
+        [NonSerialized] internal Color32[] preparedCompactPixels;
+
         public TexturePackNode Clone(bool preserveId = false)
         {
             return new TexturePackNode

@@ -27,6 +27,8 @@ the top of the window reports source capture, packing, writing, and import stage
 suffix, and output stacks are snapshotted when generation starts, so the rest of the editor remains available
 for preparing another texture while the current job finishes. Unity texture capture and final asset import
 remain on the Editor thread because Unity does not expose those operations as thread-safe APIs.
+Packing is distributed across roughly three quarters of the available logical processors so the Editor remains
+responsive. Prepared sampler nodes read captured pixel buffers directly instead of hashing an ID per pixel.
 
 Recipes store detected sources by filename role (the part after the shared prefix), allowing the same stacks
 to be applied to another similarly named texture set. Manual sources remain direct asset references.

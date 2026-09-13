@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
 
@@ -37,9 +38,8 @@ namespace TexturePackEditor
         private readonly Rect _uvRect;
         private readonly bool _compact;
         private readonly Dictionary<Texture2D, Color[]> _pixels = new();
-        private readonly Dictionary<string, Color[]> _preparedNodePixels = new();
         private readonly Dictionary<Texture2D, Color32[]> _compactPixels = new();
-        private readonly Dictionary<string, Color32[]> _preparedCompactNodePixels = new();
+        private readonly List<TexturePackNode> _preparedNodes = new();
         private bool _prepared;
 
         public int Width => _width;
@@ -65,9 +65,12 @@ namespace TexturePackEditor
             if (_prepared)
             {
                 if (_compact)
-                    return _preparedCompactNodePixels.TryGetValue(node.id, out var compactPrepared)
-                        ? compactPrepared[pixel] : Color.black;
-                return _preparedNodePixels.TryGetValue(node.id, out var prepared) ? prepared[pixel] : Color.black;
+                {
+                    Color32[] prepared = node.preparedCompactPixels;
+                    return prepared != null ? prepared[pixel] : Color.black;
+                }
+                Color[] preparedFloat = node.preparedPixels;
+                return preparedFloat != null ? preparedFloat[pixel] : Color.black;
             }
             Texture2D texture = _sources.Resolve(node);
             if (texture == null) return Color.black;
@@ -93,8 +96,8 @@ namespace TexturePackEditor
         {
             foreach (TexturePackNode node in nodes)
             {
-                if (node.type != TexturePackNodeType.Sample || _preparedNodePixels.ContainsKey(node.id) ||
-                    _preparedCompactNodePixels.ContainsKey(node.id)) continue;
+                if (node.type != TexturePackNodeType.Sample || node.preparedPixels != null ||
+                    node.preparedCompactPixels != null) continue;
                 Texture2D texture = _sources.Resolve(node);
                 if (texture == null) continue;
                 if (_compact)
@@ -104,7 +107,8 @@ namespace TexturePackEditor
                         compactColors = ReadLinearCompact(texture, _width, _height, _uvRect);
                         _compactPixels.Add(texture, compactColors);
                     }
-                    _preparedCompactNodePixels[node.id] = compactColors;
+                    node.preparedCompactPixels = compactColors;
+                    _preparedNodes.Add(node);
                     continue;
                 }
                 if (!_pixels.TryGetValue(texture, out var colors))
@@ -112,17 +116,23 @@ namespace TexturePackEditor
                     colors = ReadLinear(texture, _width, _height, _uvRect);
                     _pixels.Add(texture, colors);
                 }
-                _preparedNodePixels[node.id] = colors;
+                node.preparedPixels = colors;
+                _preparedNodes.Add(node);
             }
             _prepared = true;
         }
 
         public void Dispose()
         {
+            foreach (TexturePackNode node in _preparedNodes)
+            {
+                node.preparedPixels = null;
+                node.preparedCompactPixels = null;
+            }
+            _preparedNodes.Clear();
             _pixels.Clear();
-            _preparedNodePixels.Clear();
             _compactPixels.Clear();
-            _preparedCompactNodePixels.Clear();
+            _prepared = false;
         }
 
         private static Color[] ReadLinear(Texture2D source, int width, int height, Rect uvRect)
@@ -334,16 +344,36 @@ namespace TexturePackEditor
             int width = plan.Width;
             int height = plan.Height;
             var pixels = new Color32[checked(width * height)];
-            int progressInterval = Mathf.Max(1, pixels.Length / 200);
-            for (int pixel = 0; pixel < pixels.Length; pixel++)
+            int completedRows = 0;
+            int reportedRows = 0;
+            int reportInterval = Math.Max(1, height / 200);
+            object progressLock = new();
+            int processorCount = Environment.ProcessorCount;
+            int reservedProcessors = Math.Max(1, processorCount / 4);
+            var options = new ParallelOptions
             {
-                if (pixel % progressInterval == 0)
+                CancellationToken = cancellationToken,
+                MaxDegreeOfParallelism = Math.Max(1, processorCount - reservedProcessors)
+            };
+            Parallel.For(0, height, options, y =>
+            {
+                int start = y * width;
+                int end = start + width;
+                for (int pixel = start; pixel < end; pixel++)
+                    pixels[pixel] = EvaluatePixel(plan.output, plan.session, pixel, plan.encodeSrgb);
+                int complete = Interlocked.Increment(ref completedRows);
+                if (complete == height || complete % reportInterval == 0)
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    reportProgress?.Invoke(pixel / (float)pixels.Length * .86f);
+                    lock (progressLock)
+                    {
+                        if (complete > reportedRows)
+                        {
+                            reportedRows = complete;
+                            reportProgress?.Invoke(complete / (float)height * .86f);
+                        }
+                    }
                 }
-                pixels[pixel] = EvaluatePixel(plan.output, plan.session, pixel, plan.encodeSrgb);
-            }
+            });
             cancellationToken.ThrowIfCancellationRequested();
             WriteTga(plan.outputPath, pixels, width, height, reportProgress, cancellationToken);
             reportProgress?.Invoke(1);
