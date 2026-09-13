@@ -299,7 +299,7 @@ namespace TexturePackEditor
             string candidate = Path.Combine(Path.GetDirectoryName(basePath) ?? "Assets",
                     baseName + suffix + ".tga").Replace('\\', '/');
             string recipeGuid = AssetDatabase.AssetPathToGUID(recipePath);
-            string outputPath = ResolveSafeOutputPath(candidate, output.lastGeneratedPath, recipeGuid);
+            string outputPath = ResolveSafeOutputPath(candidate, recipeGuid);
             var outputImporter = AssetImporter.GetAtPath(basePath) as TextureImporter;
             bool outputSrgb = outputImporter != null && outputImporter.sRGBTexture;
             int width = outputBase.width;
@@ -462,12 +462,11 @@ namespace TexturePackEditor
             importer.SaveAndReimport();
         }
 
-        private static string ResolveSafeOutputPath(string candidate, string previous, string recipeGuid)
+        private static string ResolveSafeOutputPath(string candidate, string recipeGuid)
         {
             if (!File.Exists(Path.GetFullPath(candidate))) return candidate;
             var importer = AssetImporter.GetAtPath(candidate);
-            bool owned = string.Equals(previous, candidate, StringComparison.OrdinalIgnoreCase) &&
-                         importer != null && importer.userData == GeneratedMarker + recipeGuid;
+            bool owned = importer != null && importer.userData == GeneratedMarker + recipeGuid;
             return owned ? candidate : AssetDatabase.GenerateUniqueAssetPath(candidate);
         }
 

@@ -19,7 +19,8 @@ capture and preview texture creation remain on the Editor thread.
 The output-base role supplies output resolution and Unity importer settings. Generation writes a lossless
 RGBA TGA next to that texture using the persistent safe suffix. Source assets are never overwritten.
 An existing generated file is replaced only when its importer marker and recipe match; otherwise Unity
-chooses a unique filename.
+chooses a unique filename. Regeneration replaces only the image file at that path; its existing Unity `.meta`
+file and GUID remain in place, so materials and other asset references continue pointing at the result.
 
 Full-resolution channel evaluation and TGA writing run as a cancellable background job. A progress bar at
 the top of the window reports source capture, packing, writing, and import stages. The active recipe, anchor,
