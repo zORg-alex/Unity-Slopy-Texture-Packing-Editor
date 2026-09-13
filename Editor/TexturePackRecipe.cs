@@ -237,7 +237,6 @@ namespace TexturePackEditor
         private const string SuffixKey = "TexturePackEditor.SafeOutputSuffix";
         public string Folder { get; private set; }
         public string Prefix { get; private set; }
-        public string FamilyKey => (Folder ?? string.Empty) + "/" + (Prefix ?? string.Empty);
         public string AnchorRole { get; private set; }
         public IReadOnlyDictionary<string, Texture2D> Detected => _detected;
         public IReadOnlyDictionary<string, List<Texture2D>> Conflicts => _conflicts;
@@ -307,8 +306,6 @@ namespace TexturePackEditor
                 else
                 {
                     set._conflicts.Add(pair.Key, pair.Value);
-                    Texture2D selected = TexturePackSessionBindings.Get(set.FamilyKey, pair.Key);
-                    if (selected != null && pair.Value.Contains(selected)) set._detected.Add(pair.Key, selected);
                 }
             }
             return set;

@@ -220,9 +220,9 @@ namespace TexturePackEditor
                     RefreshSourceSet(recipe == _transientRecipe);
                 }
                 GUIContent settings = EditorGUIUtility.IconContent("d_Settings");
-                settings.tooltip = "Edit project roles and recipe overrides.";
+                settings.tooltip = "Edit project role rules.";
                 if (GUILayout.Button(settings, EditorStyles.miniButton, GUILayout.Width(26), GUILayout.Height(20)))
-                    TexturePackRoleSettingsWindow.Open(anchor, recipe == _transientRecipe ? null : recipe, () =>
+                    TexturePackRoleSettingsWindow.Open(() =>
                     {
                         RefreshSourceSet(false);
                         Repaint();
@@ -244,6 +244,16 @@ namespace TexturePackEditor
                 }
                 string label = recipe == _transientRecipe ? "Save…" : "Copy…";
                 if (GUILayout.Button(label, GUILayout.Width(54))) SaveRecipeCopy();
+                GUIContent recipeSettings = EditorGUIUtility.IconContent("d_Settings");
+                recipeSettings.tooltip = "Edit role rules for this recipe.";
+                using (new EditorGUI.DisabledScope(recipe == _transientRecipe))
+                    if (GUILayout.Button(recipeSettings, EditorStyles.miniButton,
+                            GUILayout.Width(26), GUILayout.Height(20)))
+                        TexturePackRecipeSettingsWindow.Open(recipe, () =>
+                        {
+                            RefreshSourceSet(false);
+                            Repaint();
+                        });
             }
 
             string suffix = EditorPrefs.GetString(SuffixKey, "_Wet");
@@ -269,9 +279,10 @@ namespace TexturePackEditor
             _sourceScroll = EditorGUILayout.BeginScrollView(_sourceScroll,
                 GUILayout.MaxHeight(sourceHeight));
             if (_sourceSet != null)
-                foreach (var pair in _sourceSet.Detected.OrderBy(pair => pair.Key))
-                    DrawSourceCard(pair.Value, TexturePackSourceKind.DetectedRole, pair.Key,
-                        TexturePackProjectSettings.instance.DisplayName(pair.Key), false);
+                foreach (TexturePackRoleDefinition role in TexturePackProjectSettings.instance.Roles)
+                    if (_sourceSet.Detected.TryGetValue(role.id, out Texture2D texture))
+                        DrawSourceCard(texture, TexturePackSourceKind.DetectedRole, role.id,
+                            texture.name + " [" + role.name + "]", false);
             foreach (Texture2D texture in recipe.manualSources.ToArray())
                 DrawSourceCard(texture, TexturePackSourceKind.ManualTexture, null,
                     texture == null ? "Missing" : texture.name, true);
@@ -279,8 +290,11 @@ namespace TexturePackEditor
             EditorGUILayout.EndScrollView();
 
             if (_sourceSet?.HasUnresolvedConflicts == true)
-                EditorGUILayout.HelpBox("Some roles have conflicting textures. Open Role Settings to choose one.",
+                EditorGUILayout.HelpBox("Some roles match multiple textures. Adjust their role rules.",
                     MessageType.Warning);
+            if (_sourceSet?.Unmatched.Count > 0)
+                EditorGUILayout.HelpBox("Unassigned: " +
+                    string.Join(", ", _sourceSet.Unmatched.Select(texture => texture.name)), MessageType.Info);
             foreach (string error in _sourceSet?.Errors ?? Array.Empty<string>())
                 EditorGUILayout.HelpBox(error, MessageType.Warning);
 
@@ -850,7 +864,8 @@ namespace TexturePackEditor
             EditorGUI.DrawRect(card, new Color(.1f, .65f, .8f, .18f));
             Rect thumbnail = new(card.x + 5, card.y + 5, 50, 50);
             if (texture != null) EditorGUI.DrawPreviewTexture(thumbnail, texture, null, ScaleMode.ScaleToFit);
-            GUI.Label(new Rect(card.x + 61, card.y + 4, card.width - 86, 18), title, EditorStyles.boldLabel);
+            GUI.Label(new Rect(card.x + 61, card.y + 4, card.width - 86, 18),
+                new GUIContent(title, title), EditorStyles.boldLabel);
             for (int channel = 0; channel < 4; channel++)
             {
                 Rect toggle = new(card.x + 61 + channel * 31, card.y + 29, 28, 24);

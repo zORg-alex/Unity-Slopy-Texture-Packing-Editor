@@ -180,37 +180,16 @@ namespace TexturePackEditor
         }
     }
 
-    public static class TexturePackSessionBindings
-    {
-        private static readonly Dictionary<string, Texture2D> Bindings = new(StringComparer.OrdinalIgnoreCase);
-
-        public static Texture2D Get(string familyKey, string roleId)
-            => Bindings.TryGetValue(Key(familyKey, roleId), out Texture2D texture) ? texture : null;
-
-        public static void Set(string familyKey, string roleId, Texture2D texture)
-        {
-            string key = Key(familyKey, roleId);
-            if (texture == null) Bindings.Remove(key);
-            else Bindings[key] = texture;
-        }
-
-        private static string Key(string familyKey, string roleId) => familyKey + "|" + roleId;
-    }
-
     public sealed class TexturePackRoleSettingsWindow : EditorWindow
     {
-        private Texture2D _anchor;
-        private TexturePackRecipe _recipe;
         private Action _changed;
         private Vector2 _scroll;
 
-        public static void Open(Texture2D anchor, TexturePackRecipe recipe, Action changed)
+        public static void Open(Action changed)
         {
             var window = CreateInstance<TexturePackRoleSettingsWindow>();
             window.titleContent = new GUIContent("Texture Roles");
-            window.minSize = new Vector2(620, 420);
-            window._anchor = anchor;
-            window._recipe = recipe;
+            window.minSize = new Vector2(620, 300);
             window._changed = changed;
             window.ShowUtility();
         }
@@ -221,10 +200,6 @@ namespace TexturePackEditor
             settings.EnsureDefaults();
             _scroll = EditorGUILayout.BeginScrollView(_scroll);
             DrawProjectRoles(settings);
-            EditorGUILayout.Space(10);
-            DrawRecipeOverrides(settings);
-            EditorGUILayout.Space(10);
-            DrawDetectionPreview(settings);
             EditorGUILayout.EndScrollView();
         }
 
@@ -266,19 +241,46 @@ namespace TexturePackEditor
             if (EditorGUI.EndChangeCheck())
             {
                 settings.SaveSettings();
-                Changed();
+                _changed?.Invoke();
             }
         }
 
-        private void DrawRecipeOverrides(TexturePackProjectSettings settings)
+        private static void Move<T>(List<T> list, int from, int to)
         {
-            EditorGUILayout.LabelField("Recipe Overrides", EditorStyles.boldLabel);
+            T value = list[from];
+            list.RemoveAt(from);
+            list.Insert(to, value);
+        }
+    }
+
+    public sealed class TexturePackRecipeSettingsWindow : EditorWindow
+    {
+        private TexturePackRecipe _recipe;
+        private Action _changed;
+        private Vector2 _scroll;
+
+        public static void Open(TexturePackRecipe recipe, Action changed)
+        {
+            if (recipe == null) return;
+            var window = CreateInstance<TexturePackRecipeSettingsWindow>();
+            window.titleContent = new GUIContent("Recipe Roles");
+            window.minSize = new Vector2(620, 300);
+            window._recipe = recipe;
+            window._changed = changed;
+            window.ShowUtility();
+        }
+
+        private void OnGUI()
+        {
             if (_recipe == null)
             {
-                EditorGUILayout.HelpBox("Save or select a recipe to add recipe-specific rules.", MessageType.Info);
+                Close();
                 return;
             }
+            TexturePackProjectSettings settings = TexturePackProjectSettings.instance;
             _recipe.EnsureOutputs();
+            _scroll = EditorGUILayout.BeginScrollView(_scroll);
+            EditorGUILayout.LabelField("Recipe Role Overrides", EditorStyles.boldLabel);
             EditorGUI.BeginChangeCheck();
             foreach (TexturePackRoleDefinition role in settings.Roles)
             {
@@ -314,54 +316,9 @@ namespace TexturePackEditor
             if (EditorGUI.EndChangeCheck())
             {
                 EditorUtility.SetDirty(_recipe);
-                Changed();
+                _changed?.Invoke();
             }
-        }
-
-        private void DrawDetectionPreview(TexturePackProjectSettings settings)
-        {
-            EditorGUILayout.LabelField("Detection Preview", EditorStyles.boldLabel);
-            if (_anchor == null)
-            {
-                EditorGUILayout.HelpBox("Choose an anchor texture in the main window.", MessageType.Info);
-                return;
-            }
-            TexturePackSourceSet sourceSet = TexturePackSourceSet.Detect(_anchor, _recipe);
-            foreach (TexturePackRoleDefinition role in settings.Roles)
-            {
-                if (sourceSet.Conflicts.TryGetValue(role.id, out List<Texture2D> conflicts))
-                {
-                    Texture2D selected = TexturePackSessionBindings.Get(sourceSet.FamilyKey, role.id);
-                    Texture2D next = (Texture2D)EditorGUILayout.ObjectField(role.name + " (conflict)", selected,
-                        typeof(Texture2D), false);
-                    if (next != selected && (next == null || conflicts.Contains(next)))
-                    {
-                        TexturePackSessionBindings.Set(sourceSet.FamilyKey, role.id, next);
-                        Changed();
-                    }
-                    EditorGUILayout.LabelField("Matches: " + string.Join(", ", conflicts.Select(item => item.name)),
-                        EditorStyles.miniLabel);
-                }
-                else if (sourceSet.Detected.TryGetValue(role.id, out Texture2D texture))
-                    EditorGUILayout.ObjectField(role.name, texture, typeof(Texture2D), false);
-            }
-            if (sourceSet.Unmatched.Count > 0)
-                EditorGUILayout.HelpBox("Unmatched: " + string.Join(", ", sourceSet.Unmatched.Select(item => item.name)),
-                    MessageType.Info);
-            foreach (string error in sourceSet.Errors) EditorGUILayout.HelpBox(error, MessageType.Warning);
-        }
-
-        private void Changed()
-        {
-            _changed?.Invoke();
-            Repaint();
-        }
-
-        private static void Move<T>(List<T> list, int from, int to)
-        {
-            T value = list[from];
-            list.RemoveAt(from);
-            list.Insert(to, value);
+            EditorGUILayout.EndScrollView();
         }
     }
 }

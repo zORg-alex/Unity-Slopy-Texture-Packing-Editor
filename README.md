@@ -30,10 +30,11 @@ remain on the Editor thread because Unity does not expose those operations as th
 Packing is distributed across roughly three quarters of the available logical processors so the Editor remains
 responsive. Prepared sampler nodes read captured pixel buffers directly instead of hashing an ID per pixel.
 
-Detected textures are assigned semantic roles such as Basemap, MaskMap, Normal, and Specular. The settings
-button beside the anchor edits the project-wide role catalog. Literal rules are case-insensitive `|`-separated
+Detected textures are assigned semantic roles such as Basemap, MaskMap, Normal, and Specular. Source cards are
+shown in project-role order as `textureName [Role]`. The settings button beside the anchor edits only the
+project-wide role catalog; the matching button beside the recipe edits only that recipe's overrides. Literal rules are case-insensitive `|`-separated
 contained terms; advanced roles can use regular expressions. Longest matches win, while tied matches and
-multiple textures assigned to one role remain unresolved until the rules or session binding are corrected.
+multiple textures assigned to one role remain unresolved until their rules are corrected.
 
 Recipes store stable semantic role IDs rather than texture naming conventions. A recipe can add terms to a
 project role or override its rule entirely. Changing texture families therefore never rewrites the recipe.
