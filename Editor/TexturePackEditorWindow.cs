@@ -6,6 +6,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEditor;
+using UnityEditor.AnimatedValues;
 using UnityEngine;
 
 namespace TexturePackEditor
@@ -47,6 +48,7 @@ namespace TexturePackEditor
         private readonly Dictionary<string, Texture2D> _nodePreviews = new();
         private readonly Dictionary<string, Color32[]> _nodePreviewPixels = new();
         private readonly Dictionary<string, float[]> _histograms = new();
+        private readonly Dictionary<string, AnimBool> _nodeAnimations = new();
         private readonly ConcurrentQueue<TexturePackPreviewUpdate> _previewUpdates = new();
         private Texture2D _largePreview;
         private Color32[] _lastOutputPixels;
@@ -90,6 +92,8 @@ namespace TexturePackEditor
         {
             public TexturePackNode Node;
             public List<string> NodeIds;
+            public string Label;
+            public TexturePackNodeType GhostType;
         }
 
         private sealed class GenerationProgress
@@ -164,6 +168,9 @@ namespace TexturePackEditor
             _generationPlan = null;
             _generationCancellation?.Dispose();
             _generationCancellation = null;
+            foreach (AnimBool animation in _nodeAnimations.Values)
+                animation.valueChanged.RemoveListener(Repaint);
+            _nodeAnimations.Clear();
             ReleaseStaticTextures();
             if (recipe != null && recipe != _transientRecipe) AssetDatabase.SaveAssetIfDirty(recipe);
             if (_transientRecipe != null) DestroyImmediate(_transientRecipe);
@@ -172,6 +179,7 @@ namespace TexturePackEditor
         private void OnGUI()
         {
             EnsureRecipe();
+            if (Event.current.type == EventType.Layout) PruneNodeAnimations();
             HandleKeyboard();
             DrawGenerationProgress();
             using (new EditorGUILayout.HorizontalScope())
@@ -183,6 +191,7 @@ namespace TexturePackEditor
                 DrawSeparator();
                 using (new EditorGUILayout.VerticalScope(GUILayout.Width(220))) DrawToolsColumn();
             }
+            DrawDragGhost();
         }
 
         private void DrawGenerationProgress()
@@ -222,7 +231,7 @@ namespace TexturePackEditor
                 GUIContent settings = EditorGUIUtility.IconContent("d_Settings");
                 settings.tooltip = "Edit project role rules.";
                 if (GUILayout.Button(settings, EditorStyles.miniButton, GUILayout.Width(26), GUILayout.Height(20)))
-                    TexturePackRoleSettingsWindow.Open(() =>
+                    TexturePackRoleSettingsWindow.Open(GUIUtility.GUIToScreenRect(GUILayoutUtility.GetLastRect()), () =>
                     {
                         RefreshSourceSet(false);
                         Repaint();
@@ -249,7 +258,8 @@ namespace TexturePackEditor
                 using (new EditorGUI.DisabledScope(recipe == _transientRecipe))
                     if (GUILayout.Button(recipeSettings, EditorStyles.miniButton,
                             GUILayout.Width(26), GUILayout.Height(20)))
-                        TexturePackRecipeSettingsWindow.Open(recipe, () =>
+                        TexturePackRecipeSettingsWindow.Open(
+                            GUIUtility.GUIToScreenRect(GUILayoutUtility.GetLastRect()), recipe, () =>
                         {
                             RefreshSourceSet(false);
                             Repaint();
@@ -641,6 +651,8 @@ namespace TexturePackEditor
         private void DrawNode(int channel, int index, TexturePackNode node)
         {
             bool selected = _selection.Contains(node.id);
+            AnimBool animation = NodeAnimation(node);
+            animation.target = node.expanded;
             using (new EditorGUILayout.VerticalScope(NodeContainerStyle))
             {
                 Rect header = GUILayoutUtility.GetRect(27, 28, GUILayout.ExpandWidth(true));
@@ -650,6 +662,7 @@ namespace TexturePackEditor
                 if (GUI.Button(fold, node.expanded ? "▼" : "▶", EditorStyles.miniButton))
                 {
                     node.expanded = !node.expanded;
+                    animation.target = node.expanded;
                     MarkRecipeDirty();
                 }
                 GUI.Label(new Rect(header.x + 25, header.y + 4, header.width - 54, 20),
@@ -658,15 +671,19 @@ namespace TexturePackEditor
                 {
                     ActiveOutput.channels[channel].nodes.RemoveAt(index);
                     _selection.Remove(node.id);
+                    RemoveNodeAnimation(node.id);
                     if (_lastSelectedId == node.id) SelectFinalPreview();
                     Changed(1 << channel);
                     return;
                 }
                 Rect dragArea = new(header.x + 22, header.y, header.width - 48, header.height);
                 HandleNodeSelection(dragArea, channel, index, node);
-                HandleDragSource(dragArea, new DragPayload { NodeIds = DraggedNodeIds(node.id) }, "Move nodes", null);
+                List<string> draggedIds = DraggedNodeIds(node.id);
+                string dragLabel = draggedIds.Count == 1 ? NodeTitle(node) : draggedIds.Count + " nodes";
+                HandleDragSource(dragArea, new DragPayload
+                    { NodeIds = draggedIds, Label = dragLabel, GhostType = node.type }, dragLabel, null);
 
-                if (node.expanded)
+                if (EditorGUILayout.BeginFadeGroup(animation.faded))
                 {
                     using (new EditorGUILayout.VerticalScope(NodeBodyStyle))
                     using (new EditorGUILayout.HorizontalScope())
@@ -679,6 +696,8 @@ namespace TexturePackEditor
                         }
                     }
                 }
+                EditorGUILayout.EndFadeGroup();
+                GUILayout.Space(4 * (1 - animation.faded));
             }
         }
 
@@ -717,6 +736,31 @@ namespace TexturePackEditor
                 showSelectedNode = true;
                 Changed(1 << channel);
             }
+        }
+
+        private AnimBool NodeAnimation(TexturePackNode node)
+        {
+            if (_nodeAnimations.TryGetValue(node.id, out AnimBool animation)) return animation;
+            animation = new AnimBool(node.expanded) { speed = 5.5f };
+            animation.valueChanged.AddListener(Repaint);
+            _nodeAnimations.Add(node.id, animation);
+            return animation;
+        }
+
+        private void RemoveNodeAnimation(string nodeId)
+        {
+            if (!_nodeAnimations.TryGetValue(nodeId, out AnimBool animation)) return;
+            animation.valueChanged.RemoveListener(Repaint);
+            _nodeAnimations.Remove(nodeId);
+        }
+
+        private void PruneNodeAnimations()
+        {
+            if (_nodeAnimations.Count == 0 || recipe == null) return;
+            var valid = new HashSet<string>(recipe.outputs.SelectMany(output => output.channels)
+                .SelectMany(channel => channel.nodes).Select(node => node.id));
+            foreach (string nodeId in _nodeAnimations.Keys.Where(nodeId => !valid.Contains(nodeId)).ToArray())
+                RemoveNodeAnimation(nodeId);
         }
 
         private void DrawSampleSettings(TexturePackNode node)
@@ -934,8 +978,34 @@ namespace TexturePackEditor
                 if (payload.Node != null) AddNode(channel, index, payload.Node.Clone());
                 else if (payload.NodeIds != null) MoveNodes(payload.NodeIds, channel, index);
                 ActiveOutput.channels[channel].expanded = true;
+                DragAndDrop.SetGenericData(DragKey, null);
                 Event.current.Use();
             }
+        }
+
+        private void DrawDragGhost()
+        {
+            Event current = Event.current;
+            if (current.type == EventType.DragExited)
+            {
+                DragAndDrop.SetGenericData(DragKey, null);
+                Repaint();
+                return;
+            }
+            var payload = DragAndDrop.GetGenericData(DragKey) as DragPayload;
+            if (payload == null) return;
+            if (current.type == EventType.DragUpdated) Repaint();
+            if (current.type != EventType.Repaint) return;
+            string label = string.IsNullOrEmpty(payload.Label) ? "Node" : payload.Label;
+            GUIStyle style = CollapsedNodeStyle(payload.GhostType);
+            float width = Mathf.Clamp(style.CalcSize(new GUIContent(label)).x + 16, 90, 220);
+            Vector2 mouse = current.mousePosition + new Vector2(14, 12);
+            Rect ghost = new(Mathf.Min(mouse.x, position.width - width - 6),
+                Mathf.Min(mouse.y, position.height - 26), width, 22);
+            Color previous = GUI.color;
+            GUI.color = new Color(1, 1, 1, .72f);
+            GUI.Label(ghost, new GUIContent(label), style);
+            GUI.color = previous;
         }
 
         private static void DrawSeparator()
@@ -958,6 +1028,8 @@ namespace TexturePackEditor
                 GUIUtility.hotControl = 0;
                 DragAndDrop.PrepareStartDrag();
                 DragAndDrop.objectReferences = Array.Empty<UnityEngine.Object>();
+                payload.Label ??= title;
+                if (payload.Node != null) payload.GhostType = payload.Node.type;
                 DragAndDrop.SetGenericData(DragKey, payload);
                 DragAndDrop.StartDrag(title);
                 current.Use();

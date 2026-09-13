@@ -182,17 +182,25 @@ namespace TexturePackEditor
 
     public sealed class TexturePackRoleSettingsWindow : EditorWindow
     {
+        private static TexturePackRoleSettingsWindow _openWindow;
         private Action _changed;
         private Vector2 _scroll;
 
-        public static void Open(Action changed)
+        public static void Open(Rect activatorRect, Action changed)
         {
-            var window = CreateInstance<TexturePackRoleSettingsWindow>();
+            if (_openWindow != null)
+            {
+                _openWindow.Focus();
+                return;
+            }
+            var window = _openWindow = CreateInstance<TexturePackRoleSettingsWindow>();
             window.titleContent = new GUIContent("Texture Roles");
-            window.minSize = new Vector2(620, 300);
             window._changed = changed;
-            window.ShowUtility();
+            float height = Mathf.Clamp(54 + TexturePackProjectSettings.instance.Roles.Count * 31, 116, 300);
+            window.ShowAsDropDown(activatorRect, new Vector2(620, height));
         }
+
+        private void OnDisable() { if (_openWindow == this) _openWindow = null; }
 
         private void OnGUI()
         {
@@ -255,20 +263,28 @@ namespace TexturePackEditor
 
     public sealed class TexturePackRecipeSettingsWindow : EditorWindow
     {
+        private static TexturePackRecipeSettingsWindow _openWindow;
         private TexturePackRecipe _recipe;
         private Action _changed;
         private Vector2 _scroll;
 
-        public static void Open(TexturePackRecipe recipe, Action changed)
+        public static void Open(Rect activatorRect, TexturePackRecipe recipe, Action changed)
         {
             if (recipe == null) return;
-            var window = CreateInstance<TexturePackRecipeSettingsWindow>();
+            if (_openWindow != null)
+            {
+                _openWindow.Focus();
+                return;
+            }
+            var window = _openWindow = CreateInstance<TexturePackRecipeSettingsWindow>();
             window.titleContent = new GUIContent("Recipe Roles");
-            window.minSize = new Vector2(620, 300);
             window._recipe = recipe;
             window._changed = changed;
-            window.ShowUtility();
+            float height = Mathf.Clamp(34 + TexturePackProjectSettings.instance.Roles.Count * 23, 92, 260);
+            window.ShowAsDropDown(activatorRect, new Vector2(620, height));
         }
+
+        private void OnDisable() { if (_openWindow == this) _openWindow = null; }
 
         private void OnGUI()
         {

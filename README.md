@@ -35,6 +35,7 @@ shown in project-role order as `textureName [Role]`. The settings button beside 
 project-wide role catalog; the matching button beside the recipe edits only that recipe's overrides. Literal rules are case-insensitive `|`-separated
 contained terms; advanced roles can use regular expressions. Longest matches win, while tied matches and
 multiple textures assigned to one role remain unresolved until their rules are corrected.
+Both settings panels are compact single-instance dropdowns and close when focus moves elsewhere.
 
 Recipes store stable semantic role IDs rather than texture naming conventions. A recipe can add terms to a
 project role or override its rule entirely. Changing texture families therefore never rewrites the recipe.
@@ -47,6 +48,8 @@ range are editable. Levels displays the incoming channel histogram with collidin
 input handles plus a grayscale two-point output control. Moving either endpoint preserves the midpoint's
 proportional position within the remaining range. Thick channel-colored connections appear only between
 nodes; partial Desaturate keeps multiple wires, while a full Desaturate produces one scalar wire.
+Node bodies animate when folded. A collapsed node keeps the rounded lower edge of its container visible, and
+dragging tools, samplers, single nodes, or node groups shows a translucent label ghost beside the pointer.
 
 Preview evaluation uses a single forward pass through changed channel stacks; unchanged packed channels are
 reused. The actively edited channel is processed first, individual node previews and histogram data appear as
