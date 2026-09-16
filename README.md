@@ -1,8 +1,40 @@
 # Texture Pack Editor
 
-Open `Tools > Texture Pack Editor` to use the currently selected texture as the initial anchor. Later Project
-selection changes do not change the editor. Drag another texture into the anchor field, or use the refresh
-button to adopt the current Project selection and rescan its family. Additional textures can be added manually.
+Open `Tools > Texture Pack Editor` to use the currently selected texture, Material, or Terrain Layer as the initial input.
+Later Project selection changes do not change the editor. Drag another texture, Material, or Terrain Layer into the input
+field, or use the refresh button to adopt the current Project selection. Additional textures can be added manually.
+
+Materials supply textures directly from their shader properties. Common Base Color, Normal, Mask/Occlusion,
+and Specular properties are recognized, including `_MainTex`, `_BaseMap`, `_BaseColorMap`, `_BumpMap`,
+`_NormalMap`, `_MaskMap`, `_OcclusionMap`, and `_SpecGlossMap`. Detail maps are not treated as primary maps.
+Use **Material slots** to choose an explicit shader property for each role when using custom shaders or
+when multiple properties match. **None** disables a role; **Automatic** restores detection. These choices
+apply to the current material input and reset when switching materials. Only assigned project Texture2D
+assets become sources; shader defaults, cubemaps, and texture arrays are not exported.
+
+A new unsaved material recipe starts with one output for each detected role. Generation assigns each result
+to that role's captured shader property, preserving texture scale, offset, keywords, and other material settings.
+Existing generated assignments are overwritten in place, with original source recovery just like Terrain Layers.
+The material, shader, property names, and existing assignments are captured at the start of the job. You can
+move on to another material or Terrain Layer while it runs; the completed textures still apply to the original
+target. If that target's shader or texture assignment is edited during generation, the file is saved but the
+concurrent edit is not replaced. Texture assignment supports Undo, and completion does not select or ping assets.
+
+Terrain Layers supply Basemap, Normal, and MaskMap directly from their diffuse, normal, and mask slots,
+regardless of filenames or folders. A new unsaved recipe starts with one output for each assigned slot;
+loading an existing recipe preserves its stacks. Save the recipe, edit the outputs, then generate to assign
+the resulting textures back to the selected layer. The output's Base role determines its target slot.
+Only generated slots are changed; tiling, remapping, normal scale, and other layer settings are preserved.
+Layer assignment changes support Undo. A layer shared by multiple terrains updates all those terrains.
+
+If a slot already contains a Texture Pack Editor result, generation overwrites that same file and preserves
+its GUID, even with a different recipe or suffix. Its File name field is disabled while reusing that assignment.
+The source textures remain intact. New exports remember the original input GUID, allowing previews and
+regeneration to use the original instead of compounding previous edits. Older exports fall back to locating
+the unsuffixed original in the same folder; if it cannot be found, the assigned generated texture is the input.
+Normal-map capture decodes Unity's packed representation back to RGB before processing and reimporting.
+Only one output per terrain slot is allowed; a warning directs you to conflicting tabs. The target layer and
+its slot assignments are captured when generation starts, so switching inputs cannot redirect the results.
 
 The window uses three columns: texture sources and generation settings, tabbed outputs with compact R/G/B/A
 stacks, and a tool shelf. Create a recipe asset before generating. Each output channel is an independent,
@@ -18,14 +50,19 @@ capture and preview texture creation remain on the Editor thread.
 
 The output-base role supplies output resolution and Unity importer settings. Generation writes a lossless
 RGBA TGA next to that texture using the persistent safe suffix. Source assets are never overwritten.
-An existing generated file is replaced only when its importer marker and recipe match; otherwise Unity
-chooses a unique filename. Regeneration replaces only the image file at that path; its existing Unity `.meta`
+In texture input mode, an existing generated file is replaced only when its importer marker, recipe, and output ID match. Before
+generation, conflicting tab names and existing files trigger a warning with proposed unique filenames.
+Choose **Use unique names** to save those names to the recipe, **Edit filenames** to return to the conflicting
+tab, or **Cancel**. Older exports with recipe-only ownership markers also require resolving this warning in
+texture input mode; a generated texture assigned to the selected Terrain Layer is authorized for replacement.
+Regeneration replaces only the image file at that path; its existing Unity `.meta`
 file and GUID remain in place, so materials and other asset references continue pointing at the result.
 
 Full-resolution channel evaluation and TGA writing run as a cancellable background job. A progress bar at
 the top of the window reports source capture, packing, writing, and import stages. The active recipe, anchor,
 suffix, and output stacks are snapshotted when generation starts, so the rest of the editor remains available
-for preparing another texture while the current job finishes. Unity texture capture and final asset import
+for preparing another texture while the current job finishes. Source assignments are captured as well;
+deleting or rearranging tabs cannot redirect completion to another tab. Unity texture capture and final asset import
 remain on the Editor thread because Unity does not expose those operations as thread-safe APIs.
 Packing is distributed across roughly three quarters of the available logical processors so the Editor remains
 responsive. Prepared sampler nodes read captured pixel buffers directly instead of hashing an ID per pixel.
@@ -41,6 +78,11 @@ Recipes store stable semantic role IDs rather than texture naming conventions. A
 project role or override its rule entirely. Changing texture families therefore never rewrites the recipe.
 Generated outputs are excluded from source detection, and selecting an owned suffixed output resolves back to
 its original texture family. Manual sampler sources remain direct asset references.
+
+Trailing resolution tags such as `_2k`, `_4k`, and `_8K` are ignored when detecting families and matching roles.
+For example, `Rock_BaseColor_4k` and `Rock_Normal_4k` belong to the `Rock` family. Original asset and output
+filenames keep their resolution tags. Multiple resolutions of the same role in one folder remain an explicit
+conflict rather than choosing one automatically.
 
 Desaturate defaults to linear Rec.709 luminance: R 0.2126, G 0.7152, B 0.0722. Green contributes most to
 perceived brightness, followed by red and then blue. Its colored weight rails, amount, and two-point output
@@ -60,7 +102,9 @@ The left divider resizes the source and preview column. The large preview can sh
 selected node, isolate R/G/B/A, zoom around the cursor with the wheel, and pan by dragging. Zoom changes the
 sampled UV region, so the worker renders only the visible portion; `1:1` matches source texels to preview pixels.
 
-Preview jobs are canceled when superseded. Non-selected node results are retained only as 96-pixel thumbnails,
+Preview jobs are canceled when superseded. Canceled jobs carry their unfinished channel changes into the
+next preview job. Procedural noise uses the same UV region as texture sampling, so zoom and pan preserve its
+position relative to the texture. Non-selected node results are retained only as 96-pixel thumbnails,
 the selected node owns the one full viewport-sized result, and caches are pruned when nodes or output tabs change.
 Preview and export source capture use compact linear RGBA32 storage, matching the 8-bit-per-channel TGA output
 while avoiding the previous RGBAFloat memory spike. Closing the window cancels active work and destroys all

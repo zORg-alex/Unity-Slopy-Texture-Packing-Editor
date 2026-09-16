@@ -16,8 +16,14 @@ namespace TexturePackEditor
         internal string outputPath;
         internal string sourcePath;
         internal string recipeGuid;
-        internal int outputIndex;
         internal bool encodeSrgb;
+        internal TerrainLayer terrainLayer;
+        internal string terrainRole;
+        internal Texture2D terrainAssignment;
+        internal Material material;
+        internal Shader materialShader;
+        internal string materialProperty;
+        internal Texture2D materialAssignment;
 
         public string OutputPath => outputPath;
         public int Width => session.Width;
@@ -44,6 +50,9 @@ namespace TexturePackEditor
 
         public int Width => _width;
         public int Height => _height;
+        public Vector2 PixelUv(int pixel) => new(
+            _uvRect.x + (pixel % _width + .5f) / _width * _uvRect.width,
+            _uvRect.y + (pixel / _width + .5f) / _height * _uvRect.height);
 
         public TexturePackPixelSession(TexturePackSourceSet sources, int width, int height)
             : this(sources, width, height, new Rect(0, 0, 1, 1))
@@ -135,6 +144,27 @@ namespace TexturePackEditor
             _prepared = false;
         }
 
+        private static void BlitSource(Texture2D source, RenderTexture destination, Rect uvRect)
+        {
+            var importer = AssetImporter.GetAtPath(AssetDatabase.GetAssetPath(source)) as TextureImporter;
+            if (importer == null || importer.textureType != TextureImporterType.NormalMap)
+            {
+                Graphics.Blit(source, destination, new Vector2(uvRect.width, uvRect.height),
+                    new Vector2(uvRect.x, uvRect.y));
+                return;
+            }
+            // Imported normals may use DXT5nm/BC5 packing. Convert them back to RGB before exporting.
+            Shader shader = Shader.Find("Hidden/TexturePackEditor/ReadNormal");
+            if (shader == null) throw new InvalidOperationException("Texture Pack Editor normal capture shader is missing.");
+            var material = new Material(shader) { hideFlags = HideFlags.HideAndDontSave };
+            try
+            {
+                material.SetVector("_UvRect", new Vector4(uvRect.x, uvRect.y, uvRect.width, uvRect.height));
+                Graphics.Blit(source, destination, material);
+            }
+            finally { UnityEngine.Object.DestroyImmediate(material); }
+        }
+
         private static Color[] ReadLinear(Texture2D source, int width, int height, Rect uvRect)
         {
             RenderTexture temporary = RenderTexture.GetTemporary(width, height, 0,
@@ -142,8 +172,7 @@ namespace TexturePackEditor
             var previous = RenderTexture.active;
             try
             {
-                Graphics.Blit(source, temporary, new Vector2(uvRect.width, uvRect.height),
-                    new Vector2(uvRect.x, uvRect.y));
+                BlitSource(source, temporary, uvRect);
                 RenderTexture.active = temporary;
                 var readable = new Texture2D(width, height, TextureFormat.RGBAFloat, false, true);
                 readable.ReadPixels(new Rect(0, 0, width, height), 0, 0);
@@ -166,8 +195,7 @@ namespace TexturePackEditor
             var previous = RenderTexture.active;
             try
             {
-                Graphics.Blit(source, temporary, new Vector2(uvRect.width, uvRect.height),
-                    new Vector2(uvRect.x, uvRect.y));
+                BlitSource(source, temporary, uvRect);
                 RenderTexture.active = temporary;
                 var readable = new Texture2D(width, height, TextureFormat.RGBA32, false, true);
                 readable.ReadPixels(new Rect(0, 0, width, height), 0, 0);
@@ -235,10 +263,8 @@ namespace TexturePackEditor
                     return Map(value, component => Levels(component, node));
                 case TexturePackNodeType.Noise:
                 {
-                    int x = pixel % session.Width;
-                    int y = pixel / session.Width;
-                    float noise = FractalNoise((x + 0.5f) / session.Width,
-                        (y + 0.5f) / session.Height, node.noiseScale, node.noiseSeed);
+                    Vector2 uv = session.PixelUv(pixel);
+                    float noise = FractalNoise(uv.x, uv.y, node.noiseScale, node.noiseSeed);
                     return node.noiseMode switch
                     {
                         TexturePackNoiseMode.Multiply => value * Mathf.Lerp(1, noise * 2, node.noiseAmount),
@@ -287,31 +313,31 @@ namespace TexturePackEditor
         }
 
         public static TexturePackBakePlan PrepareBake(TexturePackRecipe recipe, int outputIndex,
-            Texture2D anchor, string suffix, TexturePackOutput outputSnapshot = null)
+            Texture2D anchor, string suffix, TexturePackOutput outputSnapshot = null,
+            TexturePackSourceSet sourceSnapshot = null)
         {
-            if (recipe == null || anchor == null) throw new ArgumentNullException();
+            if (recipe == null || (anchor == null && sourceSnapshot == null)) throw new ArgumentNullException();
             string recipePath = AssetDatabase.GetAssetPath(recipe);
             if (string.IsNullOrEmpty(recipePath)) throw new InvalidOperationException("Save the recipe asset before generating.");
             suffix = SanitizeSuffix(suffix);
             if (string.IsNullOrEmpty(suffix)) throw new InvalidOperationException("Safe output suffix cannot be empty.");
 
             recipe.EnsureOutputs();
-            if (outputIndex < 0 || outputIndex >= recipe.outputs.Count)
+            if (outputSnapshot == null && (outputIndex < 0 || outputIndex >= recipe.outputs.Count))
                 throw new ArgumentOutOfRangeException(nameof(outputIndex));
             TexturePackOutput output = outputSnapshot ?? recipe.outputs[outputIndex];
-            TexturePackSourceSet sources = TexturePackSourceSet.Detect(anchor, recipe);
+            TexturePackSourceSet sources = sourceSnapshot ?? TexturePackSourceSet.Detect(anchor, recipe);
             string outputRole = recipe.EffectiveOutputRole(output);
             Texture2D outputBase = sources.ResolveRole(outputRole);
             if (outputBase == null) throw new InvalidOperationException("Output-base role is unresolved: " +
                                                                         TexturePackProjectSettings.instance.DisplayName(outputRole));
             string basePath = AssetDatabase.GetAssetPath(outputBase);
-            string baseName = string.IsNullOrWhiteSpace(output.outputFileName)
-                ? Path.GetFileNameWithoutExtension(basePath)
-                : SanitizeFileName(output.outputFileName);
-            string candidate = Path.Combine(Path.GetDirectoryName(basePath) ?? "Assets",
-                    baseName + suffix + ".tga").Replace('\\', '/');
+            string candidate = OutputCandidate(recipe, output, sources, suffix);
             string recipeGuid = AssetDatabase.AssetPathToGUID(recipePath);
-            string outputPath = ResolveSafeOutputPath(candidate, recipeGuid);
+            if (HasOutputConflict(candidate, recipeGuid, output.id, sources.BoundOverwritePath(outputRole)))
+                throw new InvalidOperationException("Output file already belongs to another output: " + candidate +
+                    ". Choose a different File name and generate again.");
+            string outputPath = candidate;
             var outputImporter = AssetImporter.GetAtPath(basePath) as TextureImporter;
             bool outputSrgb = outputImporter != null && outputImporter.sRGBTexture;
             int width = outputBase.width;
@@ -328,7 +354,13 @@ namespace TexturePackEditor
                     outputPath = outputPath,
                     sourcePath = basePath,
                     recipeGuid = recipeGuid,
-                    outputIndex = outputIndex,
+                    terrainLayer = sources.TerrainLayer,
+                    terrainRole = outputRole,
+                    terrainAssignment = sources.BoundAssignment(outputRole),
+                    material = sources.Material,
+                    materialShader = sources.MaterialShader,
+                    materialProperty = sources.MaterialProperty(outputRole),
+                    materialAssignment = sources.BoundAssignment(outputRole),
                     encodeSrgb = outputSrgb
                 };
             }
@@ -388,10 +420,16 @@ namespace TexturePackEditor
             AssetDatabase.ImportAsset(plan.outputPath,
                 ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
             ConfigureImporter(plan.outputPath, AssetImporter.GetAtPath(plan.sourcePath) as TextureImporter,
-                plan.recipeGuid);
+                plan.recipeGuid, plan.output.id, plan.sourcePath);
+            if (plan.terrainLayer != null)
+                TexturePackTerrainBinding.Apply(plan.terrainLayer, plan.terrainRole,
+                    AssetDatabase.LoadAssetAtPath<Texture2D>(plan.outputPath), plan.terrainAssignment);
+            if (plan.materialProperty != null)
+                TexturePackMaterialBinding.Apply(plan.material, plan.materialShader, plan.materialProperty,
+                    AssetDatabase.LoadAssetAtPath<Texture2D>(plan.outputPath), plan.materialAssignment);
             recipe.EnsureOutputs();
-            if (plan.outputIndex >= 0 && plan.outputIndex < recipe.outputs.Count)
-                recipe.outputs[plan.outputIndex].lastGeneratedPath = plan.outputPath;
+            TexturePackOutput destination = recipe.outputs.FirstOrDefault(output => output.id == plan.output.id);
+            if (destination != null) destination.lastGeneratedPath = plan.outputPath;
             recipe.EnsureOutputs();
             EditorUtility.SetDirty(recipe);
             AssetDatabase.SaveAssetIfDirty(recipe);
@@ -473,7 +511,8 @@ namespace TexturePackEditor
             return new Color32(ToByte(r), ToByte(g), ToByte(b), ToByte(a));
         }
 
-        private static void ConfigureImporter(string path, TextureImporter template, string recipeGuid)
+        private static void ConfigureImporter(string path, TextureImporter template, string recipeGuid, string outputId,
+            string sourcePath)
         {
             var importer = (TextureImporter)AssetImporter.GetAtPath(path);
             if (template != null)
@@ -490,16 +529,94 @@ namespace TexturePackEditor
                 importer.maxTextureSize = template.maxTextureSize;
                 importer.npotScale = template.npotScale;
             }
-            importer.userData = GeneratedMarker + recipeGuid;
+            // Keep the original source GUID so terrain bindings can regenerate without compounding edits.
+            string originalGuid = path == sourcePath ? GeneratedSourceGuid(importer.userData) :
+                AssetDatabase.AssetPathToGUID(sourcePath);
+            importer.userData = GeneratedMarker + recipeGuid + ":" + outputId + ":" + originalGuid;
             importer.SaveAndReimport();
         }
 
-        private static string ResolveSafeOutputPath(string candidate, string recipeGuid)
+        public static bool HasOutputConflict(string candidate, string recipeGuid, string outputId,
+            string boundOverwritePath = null)
         {
-            if (!File.Exists(Path.GetFullPath(candidate))) return candidate;
+            if (!File.Exists(Path.GetFullPath(candidate))) return false;
             var importer = AssetImporter.GetAtPath(candidate);
-            bool owned = importer != null && importer.userData == GeneratedMarker + recipeGuid;
-            return owned ? candidate : AssetDatabase.GenerateUniqueAssetPath(candidate);
+            if (importer == null) return true;
+            if (string.Equals(candidate, boundOverwritePath, StringComparison.OrdinalIgnoreCase) &&
+                IsGeneratedMarker(importer.userData)) return false;
+            string owner = GeneratedMarker + recipeGuid + ":" + outputId;
+            return importer.userData != owner &&
+                   !(importer.userData ?? string.Empty).StartsWith(owner + ":", StringComparison.Ordinal);
+        }
+
+        public static string OutputCandidate(TexturePackRecipe recipe, TexturePackOutput output,
+            TexturePackSourceSet sources, string suffix)
+        {
+            string reuse = sources.BoundOverwritePath(recipe.EffectiveOutputRole(output));
+            if (!string.IsNullOrEmpty(reuse)) return reuse;
+            suffix = SanitizeSuffix(suffix);
+            if (string.IsNullOrEmpty(suffix)) throw new InvalidOperationException("Safe output suffix cannot be empty.");
+            Texture2D texture = sources.ResolveRole(recipe.EffectiveOutputRole(output));
+            if (texture == null) throw new InvalidOperationException("Output base is unresolved.");
+            string path = AssetDatabase.GetAssetPath(texture);
+            string name = string.IsNullOrWhiteSpace(output.outputFileName)
+                ? Path.GetFileNameWithoutExtension(path) : SanitizeFileName(output.outputFileName);
+            return Path.Combine(Path.GetDirectoryName(path) ?? "Assets", name + suffix + ".tga").Replace('\\', '/');
+        }
+
+        private static bool IsGeneratedMarker(string marker)
+            => !string.IsNullOrEmpty(marker) && marker.StartsWith(GeneratedMarker, StringComparison.Ordinal);
+
+        public static bool IsGeneratedTexture(Texture2D texture)
+            => texture != null && IsGeneratedMarker(AssetImporter.GetAtPath(AssetDatabase.GetAssetPath(texture))?.userData);
+
+        private static string GeneratedSourceGuid(string marker)
+        {
+            if (!IsGeneratedMarker(marker)) return null;
+            string[] fields = marker.Substring(GeneratedMarker.Length).Split(':');
+            return fields.Length >= 3 ? fields[2] : null;
+        }
+
+        public static Texture2D OriginalTexture(Texture2D texture)
+        {
+            var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            while (texture != null)
+            {
+                string path = AssetDatabase.GetAssetPath(texture);
+                if (string.IsNullOrEmpty(path) || !visited.Add(path)) return texture;
+                string marker = AssetImporter.GetAtPath(path)?.userData;
+                if (!IsGeneratedMarker(marker)) return texture;
+                string sourceGuid = GeneratedSourceGuid(marker);
+                Texture2D original = string.IsNullOrEmpty(sourceGuid) ? null :
+                    AssetDatabase.LoadAssetAtPath<Texture2D>(AssetDatabase.GUIDToAssetPath(sourceGuid));
+                // Compatibility with older exports that only stored ownership and used the safe suffix.
+                if (original == null)
+                {
+                    string suffix = EditorPrefs.GetString("TexturePackEditor.SafeOutputSuffix", "_Wet");
+                    string stem = Path.GetFileNameWithoutExtension(path);
+                    string folder = Path.GetDirectoryName(path)?.Replace('\\', '/');
+                    if (!string.IsNullOrEmpty(suffix) && stem.EndsWith(suffix, StringComparison.OrdinalIgnoreCase) &&
+                        !string.IsNullOrEmpty(folder))
+                    {
+                        string originalStem = stem.Substring(0, stem.Length - suffix.Length);
+                        foreach (string guid in AssetDatabase.FindAssets("t:Texture2D", new[] { folder }))
+                        {
+                            string candidate = AssetDatabase.GUIDToAssetPath(guid);
+                            if (string.Equals(Path.GetDirectoryName(candidate)?.Replace('\\', '/'), folder,
+                                    StringComparison.OrdinalIgnoreCase) &&
+                                string.Equals(Path.GetFileNameWithoutExtension(candidate), originalStem,
+                                    StringComparison.OrdinalIgnoreCase))
+                            {
+                                original = AssetDatabase.LoadAssetAtPath<Texture2D>(candidate);
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (original == null || visited.Contains(AssetDatabase.GetAssetPath(original))) return texture;
+                texture = original;
+            }
+            return texture;
         }
 
         private static string SanitizeSuffix(string suffix)

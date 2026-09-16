@@ -32,6 +32,10 @@ namespace TexturePackEditor
         private static GUIStyle _nodeBodyStyle;
 
         [SerializeField] private Texture2D anchor;
+        [SerializeField] private TerrainLayer terrainLayer;
+        [SerializeField] private Material sourceMaterial;
+        [SerializeField] private List<TexturePackMaterialSlot> materialSlots = new();
+        [SerializeField] private bool showMaterialSlots = true;
         [SerializeField] private TexturePackRecipe recipe;
         [SerializeField] private int activeOutput;
         [SerializeField] private float leftColumnWidth = 260;
@@ -60,6 +64,7 @@ namespace TexturePackEditor
         private int _activeChannel;
         private bool _previewDirty = true;
         private int _previewDirtyChannels = 15;
+        private int _previewInFlightChannels;
         private double _previewDue;
         private int _previewRevision;
         private Task _previewTask;
@@ -73,6 +78,8 @@ namespace TexturePackEditor
         private int[] _generationOutputs;
         private TexturePackOutput[] _generationOutputSnapshots;
         private TexturePackRecipe _generationRecipe;
+        private TexturePackRecipe _generationRecipeSnapshot;
+        private TexturePackSourceSet _generationSources;
         private Texture2D _generationAnchor;
         private string _generationSuffix;
         private int _generationOutputPosition;
@@ -108,13 +115,30 @@ namespace TexturePackEditor
             var window = GetWindow<TexturePackEditorWindow>();
             window.titleContent = new GUIContent("Texture Pack Editor");
             window.minSize = new Vector2(1040, 600);
-            if (Selection.activeObject is Texture2D selected)
-            {
-                window.anchor = selected;
+            if ((Selection.activeObject is Texture2D || Selection.activeObject is TerrainLayer || Selection.activeObject is Material) &&
+                window.SetInput(Selection.activeObject))
                 window.RefreshSourceSet(window.recipe == window._transientRecipe);
-            }
             window.Show();
         }
+
+        private bool HasInput => terrainLayer != null || sourceMaterial != null || anchor != null;
+        private UnityEngine.Object InputObject => sourceMaterial != null ? sourceMaterial :
+            terrainLayer != null ? terrainLayer : anchor;
+
+        private bool SetInput(UnityEngine.Object input)
+        {
+            if (input != null && input is not Texture2D && input is not TerrainLayer && input is not Material) return false;
+            if (sourceMaterial != input as Material) materialSlots.Clear();
+            sourceMaterial = input as Material;
+            terrainLayer = input as TerrainLayer;
+            anchor = input as Texture2D;
+            return true;
+        }
+
+        private TexturePackSourceSet DetectSources(TexturePackRecipe sourceRecipe)
+            => terrainLayer != null ? TexturePackSourceSet.FromTerrainLayer(terrainLayer, sourceRecipe) :
+                sourceMaterial != null ? TexturePackSourceSet.FromMaterial(sourceMaterial, sourceRecipe, materialSlots) :
+                TexturePackSourceSet.Detect(anchor, sourceRecipe);
 
         private TexturePackOutput ActiveOutput
         {
@@ -168,6 +192,9 @@ namespace TexturePackEditor
             _generationPlan = null;
             _generationCancellation?.Dispose();
             _generationCancellation = null;
+            if (_generationRecipeSnapshot != null) DestroyImmediate(_generationRecipeSnapshot);
+            _generationRecipeSnapshot = null;
+            _generationSources = null;
             foreach (AnimBool animation in _nodeAnimations.Values)
                 animation.valueChanged.RemoveListener(Repaint);
             _nodeAnimations.Clear();
@@ -215,17 +242,19 @@ namespace TexturePackEditor
             using (new EditorGUILayout.HorizontalScope())
             {
                 EditorGUI.BeginChangeCheck();
-                Texture2D nextAnchor = (Texture2D)EditorGUILayout.ObjectField(anchor, typeof(Texture2D), false);
+                UnityEngine.Object input = InputObject;
+                UnityEngine.Object nextInput = EditorGUILayout.ObjectField(input, typeof(UnityEngine.Object), false);
                 if (EditorGUI.EndChangeCheck())
                 {
-                    anchor = nextAnchor;
-                    RefreshSourceSet(recipe == _transientRecipe);
+                    if (SetInput(nextInput)) RefreshSourceSet(recipe == _transientRecipe);
+                    else ShowNotification(new GUIContent("Choose a Texture, Material, or Terrain Layer"));
                 }
                 GUIContent refresh = EditorGUIUtility.IconContent("d_Refresh");
-                refresh.tooltip = "Use the selected Project texture, or rescan the current texture set.";
+                refresh.tooltip = "Use the selected Project texture, Material, or Terrain Layer, or rescan the current input.";
                 if (GUILayout.Button(refresh, EditorStyles.miniButton, GUILayout.Width(26), GUILayout.Height(20)))
                 {
-                    if (Selection.activeObject is Texture2D selected) anchor = selected;
+                    if (Selection.activeObject is Texture2D || Selection.activeObject is TerrainLayer || Selection.activeObject is Material)
+                        SetInput(Selection.activeObject);
                     RefreshSourceSet(recipe == _transientRecipe);
                 }
                 GUIContent settings = EditorGUIUtility.IconContent("d_Settings");
@@ -266,14 +295,18 @@ namespace TexturePackEditor
                         });
             }
 
+            if (sourceMaterial != null) DrawMaterialSlots();
             string suffix = EditorPrefs.GetString(SuffixKey, "_Wet");
             EditorGUI.BeginChangeCheck();
             suffix = EditorGUILayout.TextField("Safe suffix", suffix);
             if (EditorGUI.EndChangeCheck()) EditorPrefs.SetString(SuffixKey, suffix);
 
-            bool canGenerateTab = !_generationActive && recipe != _transientRecipe && anchor != null &&
+            if (terrainLayer != null || sourceMaterial != null)
+                EditorGUILayout.HelpBox("Generation updates the " + (sourceMaterial != null ? "Material" : "Terrain Layer") +
+                    " captured when you start, even after switching inputs. Assigned generated textures are overwritten in place.", MessageType.Info);
+            bool canGenerateTab = !_generationActive && recipe != _transientRecipe && HasInput &&
                                   IsOutputResolved(ActiveOutput);
-            bool canGenerateAny = !_generationActive && recipe != _transientRecipe && anchor != null &&
+            bool canGenerateAny = !_generationActive && recipe != _transientRecipe && HasInput &&
                                   recipe.outputs.Any(IsOutputResolved);
             using (new EditorGUILayout.HorizontalScope())
             {
@@ -300,7 +333,8 @@ namespace TexturePackEditor
             EditorGUILayout.EndScrollView();
 
             if (_sourceSet?.HasUnresolvedConflicts == true)
-                EditorGUILayout.HelpBox("Some roles match multiple textures. Adjust their role rules.",
+                EditorGUILayout.HelpBox(sourceMaterial != null ? "Some roles match multiple material slots. Choose their slots above." :
+                    "Some roles match multiple textures. Adjust their role rules.",
                     MessageType.Warning);
             if (_sourceSet?.Unmatched.Count > 0)
                 EditorGUILayout.HelpBox("Unassigned: " +
@@ -310,6 +344,33 @@ namespace TexturePackEditor
 
             DrawLargePreview();
             if (!string.IsNullOrEmpty(_previewError)) EditorGUILayout.HelpBox(_previewError, MessageType.Warning);
+        }
+
+        private void DrawMaterialSlots()
+        {
+            showMaterialSlots = EditorGUILayout.Foldout(showMaterialSlots, "Material slots", true);
+            if (!showMaterialSlots) return;
+            string[] properties = TexturePackMaterialBinding.TextureProperties(sourceMaterial);
+            foreach (TexturePackRoleDefinition role in TexturePackProjectSettings.instance.Roles)
+            {
+                TexturePackMaterialSlot mapping = materialSlots.FirstOrDefault(slot => slot.roleId == role.id);
+                int selected = mapping == null ? 0 : string.IsNullOrEmpty(mapping.propertyName) ? 1 :
+                    Array.IndexOf(properties, mapping.propertyName) + 2;
+                var options = new List<string> { "Automatic" +
+                    (_sourceSet?.MaterialProperty(role.id) is string detected && mapping == null ? " (" + detected + ")" : ""), "None" };
+                options.AddRange(properties);
+                if (mapping != null && !string.IsNullOrEmpty(mapping.propertyName) && selected < 2)
+                {
+                    selected = options.Count;
+                    options.Add("Missing: " + mapping.propertyName);
+                }
+                int next = EditorGUILayout.Popup(role.name, selected, options.ToArray());
+                if (next == selected) continue;
+                if (mapping != null) materialSlots.Remove(mapping);
+                if (next > 0) materialSlots.Add(new TexturePackMaterialSlot
+                    { roleId = role.id, propertyName = next == 1 ? string.Empty : properties[next - 2] });
+                RefreshSourceSet(false);
+            }
         }
 
         private void DrawLargePreview()
@@ -523,9 +584,13 @@ namespace TexturePackEditor
                     }
                 }
                 EditorGUI.BeginChangeCheck();
-                output.outputFileName = EditorGUILayout.TextField(
-                    new GUIContent("File name", "Optional. Empty keeps the base texture file name."),
-                    output.outputFileName);
+                string terrainPath = _sourceSet?.BoundOverwritePath(recipe.EffectiveOutputRole(output));
+                using (new EditorGUI.DisabledScope(!string.IsNullOrEmpty(terrainPath)))
+                    output.outputFileName = EditorGUILayout.TextField(
+                        new GUIContent("File name", "Optional. Existing generated Material and Terrain Layer assignments are reused."),
+                        output.outputFileName);
+                if (!string.IsNullOrEmpty(terrainPath))
+                    EditorGUILayout.LabelField("Replacing", Path.GetFileName(terrainPath));
                 if (EditorGUI.EndChangeCheck()) MarkRecipeDirty();
             }
 
@@ -1166,24 +1231,25 @@ namespace TexturePackEditor
             _transientRecipe = CreateInstance<TexturePackRecipe>();
             _transientRecipe.hideFlags = HideFlags.HideAndDontSave;
             recipe = _transientRecipe;
-            if (anchor != null) recipe.ResetTo(TexturePackSourceSet.Detect(anchor));
+            if (HasInput) recipe.ResetTo(DetectSources(recipe));
             else recipe.EnsureOutputs();
         }
 
         private void RefreshSourceSet(bool reset)
         {
-            _sourceSet = TexturePackSourceSet.Detect(anchor, recipe);
             EnsureRecipe();
-            if (reset && anchor != null) recipe.ResetTo(_sourceSet);
+            _sourceSet = DetectSources(recipe);
+            if (_sourceSet.HasBoundTarget) anchor = _sourceSet.ResolveRole(_sourceSet.AnchorRole);
+            if (reset && HasInput) recipe.ResetTo(_sourceSet);
             activeOutput = Mathf.Clamp(activeOutput, 0, recipe.outputs.Count - 1);
             Changed();
         }
 
         private void SaveRecipeCopy()
         {
-            if (anchor == null) return;
+            if (!HasInput) return;
             string folder = _sourceSet?.Folder ?? "Assets";
-            string defaultName = (_sourceSet?.Prefix ?? anchor.name) + " Texture Pack Recipe";
+            string defaultName = (_sourceSet?.Prefix ?? InputObject.name) + " Texture Pack Recipe";
             string path = EditorUtility.SaveFilePanelInProject("Save Texture Pack Recipe", defaultName,
                 "asset", "Recipe assets preserve editable stacks.", folder);
             if (string.IsNullOrEmpty(path)) return;
@@ -1194,11 +1260,96 @@ namespace TexturePackEditor
             Changed();
         }
 
+        private bool ResolveOutputConflicts(string suffix)
+        {
+            if (_sourceSet.HasBoundTarget)
+            {
+                var slots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                for (int index = 0; index < recipe.outputs.Count; index++)
+                {
+                    string role = recipe.EffectiveOutputRole(recipe.outputs[index]);
+                    string slot = _sourceSet.BoundSlot(role);
+                    if (slot == null || slots.Add(slot)) continue;
+                    EditorUtility.DisplayDialog("Texture slot conflict",
+                        "Multiple output tabs target the " + slot +
+                        " slot. Keep one output per slot, or change the extra tab's Base role or material slot mapping.", "Edit conflicting tab");
+                    activeOutput = index;
+                    SelectFinalPreview();
+                    Changed();
+                    return false;
+                }
+            }
+            string recipeGuid = AssetDatabase.AssetPathToGUID(AssetDatabase.GetAssetPath(recipe));
+            var reserved = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var changes = new List<(int index, string name, string before, string after)>();
+            // Include other tabs even for Generate Tab, so one tab cannot claim another's name.
+            for (int index = 0; index < recipe.outputs.Count; index++)
+            {
+                TexturePackOutput output = recipe.outputs[index];
+                if (_sourceSet.ResolveRole(recipe.EffectiveOutputRole(output)) == null) continue;
+                string candidate = TexturePackProcessor.OutputCandidate(recipe, output, _sourceSet, suffix);
+                string terrainPath = _sourceSet.BoundOverwritePath(recipe.EffectiveOutputRole(output));
+                if (!reserved.Contains(candidate) &&
+                    !TexturePackProcessor.HasOutputConflict(candidate, recipeGuid, output.id, terrainPath))
+                {
+                    reserved.Add(candidate);
+                    continue;
+                }
+                if (!string.IsNullOrEmpty(terrainPath))
+                {
+                    EditorUtility.DisplayDialog("Assigned texture conflict",
+                        "Multiple outputs target " + candidate + ". Assign distinct textures to the input's slots " +
+                        "or remove the conflicting output tab before generating.", "OK");
+                    return false;
+                }
+                TexturePackOutput proposed = output.Clone(true);
+                string baseName = string.IsNullOrWhiteSpace(output.outputFileName)
+                    ? Path.GetFileNameWithoutExtension(AssetDatabase.GetAssetPath(
+                        _sourceSet.ResolveRole(recipe.EffectiveOutputRole(output)))) : output.outputFileName;
+                int number = 2;
+                string unique;
+                do
+                {
+                    proposed.outputFileName = baseName + "_" + number++;
+                    unique = TexturePackProcessor.OutputCandidate(recipe, proposed, _sourceSet, suffix);
+                } while (reserved.Contains(unique) ||
+                         TexturePackProcessor.HasOutputConflict(unique, recipeGuid, output.id));
+                reserved.Add(unique);
+                changes.Add((index, proposed.outputFileName, candidate, unique));
+            }
+            if (changes.Count == 0) return true;
+            string details = string.Join("\n\n", changes.Select(change =>
+                recipe.outputs[change.index].name + ":\n" + change.before + "\n→ " + change.after));
+            int choice = EditorUtility.DisplayDialogComplex("Output filename conflicts",
+                "These destinations overlap another tab or an existing file that this output does not own. " +
+                "Use the proposed names, or edit each tab's File name before generating.\n\n" + details,
+                "Use unique names", "Cancel", "Edit filenames");
+            if (choice != 0)
+            {
+                if (choice == 2)
+                {
+                    activeOutput = changes[0].index;
+                    _selection.Clear();
+                    SelectFinalPreview();
+                    Changed();
+                }
+                return false;
+            }
+            Undo.RecordObject(recipe, "Resolve output filename conflicts");
+            foreach (var change in changes) recipe.outputs[change.index].outputFileName = change.name;
+            EditorUtility.SetDirty(recipe);
+            AssetDatabase.SaveAssetIfDirty(recipe);
+            return true;
+        }
+
         private void Generate(bool all)
         {
             if (_generationActive) return;
             try
             {
+                _sourceSet = DetectSources(recipe);
+                string suffix = EditorPrefs.GetString(SuffixKey, "_Wet");
+                if (!ResolveOutputConflicts(suffix)) return;
                 _generationOutputs = all
                     ? Enumerable.Range(0, recipe.outputs.Count).Where(index => IsOutputResolved(recipe.outputs[index])).ToArray()
                     : new[] { activeOutput };
@@ -1207,8 +1358,11 @@ namespace TexturePackEditor
                 _generationOutputSnapshots = _generationOutputs
                     .Select(output => recipe.outputs[output].Clone(true)).ToArray();
                 _generationRecipe = recipe;
+                _generationRecipeSnapshot = Instantiate(recipe);
+                _generationRecipeSnapshot.hideFlags = HideFlags.HideAndDontSave;
+                _generationSources = DetectSources(_generationRecipeSnapshot);
                 _generationAnchor = anchor;
-                _generationSuffix = EditorPrefs.GetString(SuffixKey, "_Wet");
+                _generationSuffix = suffix;
                 _generationOutputPosition = 0;
                 _generationProgress = 0;
                 _generationStatus = "Preparing…";
@@ -1246,7 +1400,7 @@ namespace TexturePackEditor
                 _generationStatus = "Reading sources for " + outputName + "…";
                 Repaint();
                 _generationPlan = TexturePackProcessor.PrepareBake(_generationRecipe, outputIndex,
-                    _generationAnchor, _generationSuffix, outputSnapshot);
+                    _generationAnchor, _generationSuffix, outputSnapshot, _generationSources);
                 int position = _generationOutputPosition;
                 int count = _generationOutputs.Length;
                 CancellationToken cancellation = _generationCancellation.Token;
@@ -1321,6 +1475,9 @@ namespace TexturePackEditor
             _generationOutputs = null;
             _generationOutputSnapshots = null;
             _generationRecipe = null;
+            if (_generationRecipeSnapshot != null) DestroyImmediate(_generationRecipeSnapshot);
+            _generationRecipeSnapshot = null;
+            _generationSources = null;
             _generationAnchor = null;
             _generationSuffix = null;
             _generationActive = false;
@@ -1333,17 +1490,16 @@ namespace TexturePackEditor
             else if (cancelled) ShowNotification(new GUIContent("Texture generation cancelled"));
             else if (_generationLastPath != null)
             {
-                EditorGUIUtility.PingObject(AssetDatabase.LoadAssetAtPath<Texture2D>(_generationLastPath));
                 ShowNotification(new GUIContent("Generated " + generatedCount + " texture(s)"));
             }
-            Repaint();
+            RefreshSourceSet(false);
         }
 
         private void Changed(int channelMask = 15)
         {
             if (recipe != null && recipe != _transientRecipe) EditorUtility.SetDirty(recipe);
             _previewDirty = true;
-            _previewDirtyChannels |= channelMask & 15;
+            _previewDirtyChannels |= (channelMask & 15) | _previewInFlightChannels;
             _previewRevision++;
             _previewCancellation?.Cancel();
             _previewDue = EditorApplication.timeSinceStartup + PreviewDebounce;
@@ -1386,15 +1542,18 @@ namespace TexturePackEditor
 
         private void StartPreview()
         {
-            if (anchor == null || recipe == null || recipe.outputs.Count == 0) return;
+            if (!HasInput || recipe == null || recipe.outputs.Count == 0) return;
             _previewDirty = false;
             _previewError = null;
             try
             {
-                _sourceSet = TexturePackSourceSet.Detect(anchor, recipe);
+                _sourceSet = DetectSources(recipe);
                 TexturePackOutput snapshot = ActiveOutput.Clone(true);
                 PrunePreviewCaches(snapshot);
                 int channelMask = _previewDirtyChannels == 0 ? 15 : _previewDirtyChannels;
+                if (_lastOutputPixels == null || _lastOutputPixels.Length != previewResolution * previewResolution)
+                    channelMask = 15;
+                _previewInFlightChannels = channelMask;
                 _previewDirtyChannels = 0;
                 _previewSession = new TexturePackPixelSession(_sourceSet, previewResolution, previewResolution,
                     PreviewUvRect(), compact: true);
@@ -1420,6 +1579,8 @@ namespace TexturePackEditor
             catch (Exception exception)
             {
                 _previewError = exception.Message;
+                _previewDirtyChannels |= _previewInFlightChannels;
+                _previewInFlightChannels = 0;
                 _previewSession?.Dispose();
                 _previewSession = null;
             }
@@ -1429,6 +1590,7 @@ namespace TexturePackEditor
         {
             if (update.isOutput)
             {
+                _previewInFlightChannels = 0;
                 _lastOutputPixels = update.pixels;
                 if (!showSelectedNode) RebuildLargePreview();
             }

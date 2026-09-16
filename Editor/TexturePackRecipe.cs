@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using UnityEditor;
 using UnityEngine;
 
@@ -195,7 +196,14 @@ namespace TexturePackEditor
         public void ResetTo(TexturePackSourceSet sourceSet)
         {
             outputs.Clear();
-            outputs.Add(TexturePackOutput.Create(sourceSet, sourceSet.AnchorRole));
+            if (sourceSet.HasBoundTarget)
+            {
+                foreach (string role in sourceSet.TerrainLayer != null ? TexturePackTerrainBinding.Roles : sourceSet.SortedRoles())
+                    if (sourceSet.ResolveRole(role) != null)
+                        outputs.Add(TexturePackOutput.Create(sourceSet, role,
+                            TexturePackProjectSettings.instance.DisplayName(role)));
+            }
+            else outputs.Add(TexturePackOutput.Create(sourceSet, sourceSet.AnchorRole));
             EnsureOutputs();
         }
 
@@ -238,6 +246,12 @@ namespace TexturePackEditor
         public string Folder { get; private set; }
         public string Prefix { get; private set; }
         public string AnchorRole { get; private set; }
+        public TerrainLayer TerrainLayer { get; private set; }
+        public Material Material { get; private set; }
+        public Shader MaterialShader { get; private set; }
+        public bool HasBoundTarget => TerrainLayer != null || Material != null;
+        private readonly Dictionary<string, Texture2D> _boundAssignments = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, string> _materialProperties = new(StringComparer.OrdinalIgnoreCase);
         public IReadOnlyDictionary<string, Texture2D> Detected => _detected;
         public IReadOnlyDictionary<string, List<Texture2D>> Conflicts => _conflicts;
         public bool HasUnresolvedConflicts => _conflicts.Keys.Any(role => !_detected.ContainsKey(role));
@@ -249,11 +263,98 @@ namespace TexturePackEditor
         private readonly List<string> _errors = new();
         private TexturePackRecipe _recipe;
 
+        public Texture2D BoundAssignment(string role)
+            => role != null && _boundAssignments.TryGetValue(role, out Texture2D texture) ? texture : null;
+
+        public string MaterialProperty(string role)
+            => role != null && _materialProperties.TryGetValue(role, out string property) ? property : null;
+
+        public string BoundSlot(string role)
+            => TerrainLayer != null && TexturePackTerrainBinding.Supports(role) ? role : MaterialProperty(role);
+
+        public string BoundOverwritePath(string role)
+        {
+            Texture2D assigned = BoundAssignment(role);
+            return TexturePackProcessor.IsGeneratedTexture(assigned) ? AssetDatabase.GetAssetPath(assigned) : null;
+        }
+
+        public static TexturePackSourceSet FromTerrainLayer(TerrainLayer layer, TexturePackRecipe recipe = null)
+        {
+            var set = new TexturePackSourceSet { _recipe = recipe, TerrainLayer = layer };
+            if (layer == null) return set;
+            string layerPath = AssetDatabase.GetAssetPath(layer);
+            set.Folder = string.IsNullOrEmpty(layerPath) ? "Assets" :
+                Path.GetDirectoryName(layerPath)?.Replace('\\', '/');
+            set.Prefix = layer.name;
+            foreach (string role in TexturePackTerrainBinding.Roles)
+            {
+                Texture2D assigned = TexturePackTerrainBinding.GetTexture(layer, role);
+                set._boundAssignments[role] = assigned;
+                if (assigned == null) continue;
+                // The layer slots are authoritative, independent of filenames and role matching rules.
+                set._detected[role] = TexturePackProcessor.OriginalTexture(assigned);
+                set.AnchorRole ??= role;
+            }
+            return set;
+        }
+
+        public static TexturePackSourceSet FromMaterial(Material material, TexturePackRecipe recipe = null,
+            IReadOnlyList<TexturePackMaterialSlot> overrides = null)
+        {
+            var set = new TexturePackSourceSet { _recipe = recipe, Material = material,
+                MaterialShader = material == null ? null : material.shader };
+            if (material == null) return set;
+            string path = AssetDatabase.GetAssetPath(material);
+            set.Folder = string.IsNullOrEmpty(path) ? "Assets" : Path.GetDirectoryName(path)?.Replace('\\', '/');
+            set.Prefix = material.name;
+            string[] properties = TexturePackMaterialBinding.TextureProperties(material);
+            foreach (TexturePackRoleDefinition role in TexturePackProjectSettings.instance.Roles)
+            {
+                TexturePackMaterialSlot mapping = overrides?.FirstOrDefault(slot =>
+                    string.Equals(slot.roleId, role.id, StringComparison.OrdinalIgnoreCase));
+                string property;
+                if (mapping != null)
+                {
+                    property = mapping.propertyName;
+                    if (string.IsNullOrEmpty(property)) continue;
+                    if (!properties.Contains(property))
+                    {
+                        set._errors.Add("Material slot no longer exists: " + property);
+                        continue;
+                    }
+                }
+                else
+                {
+                    string[] candidates = properties.Where(name => material.GetTexture(name) is Texture2D texture &&
+                        !string.IsNullOrEmpty(AssetDatabase.GetAssetPath(texture)) &&
+                        string.Equals(TexturePackMaterialBinding.RoleForProperty(name, recipe), role.id,
+                            StringComparison.OrdinalIgnoreCase)).ToArray();
+                    if (candidates.Length == 0) continue;
+                    if (candidates.Length > 1)
+                    {
+                        set._conflicts[role.id] = candidates.Select(name => (Texture2D)material.GetTexture(name)).ToList();
+                        set._errors.Add(role.name + " matches " + string.Join(", ", candidates) +
+                            ". Choose its texture slot under Material slots.");
+                        continue;
+                    }
+                    property = candidates[0];
+                }
+                set._materialProperties[role.id] = property;
+                var assigned = material.GetTexture(property) as Texture2D;
+                set._boundAssignments[role.id] = assigned;
+                if (assigned == null || string.IsNullOrEmpty(AssetDatabase.GetAssetPath(assigned))) continue;
+                set._detected[role.id] = TexturePackProcessor.OriginalTexture(assigned);
+                if (set.AnchorRole == null || role.id == "basemap") set.AnchorRole = role.id;
+            }
+            return set;
+        }
+
         public static TexturePackSourceSet Detect(Texture2D anchor, TexturePackRecipe recipe = null)
         {
             var set = new TexturePackSourceSet();
             set._recipe = recipe;
             if (anchor == null) return set;
+            anchor = TexturePackProcessor.OriginalTexture(anchor);
             string path = AssetDatabase.GetAssetPath(anchor);
             set.Folder = Path.GetDirectoryName(path)?.Replace('\\', '/');
             string stem = Path.GetFileNameWithoutExtension(path);
@@ -270,6 +371,7 @@ namespace TexturePackEditor
                     stem = Path.GetFileNameWithoutExtension(path);
                 }
             }
+            stem = StripResolutionSuffix(stem);
             int separator = stem.LastIndexOf('_');
             set.Prefix = separator > 0 ? stem.Substring(0, separator) : stem;
             string anchorRawRole = separator > 0 ? stem.Substring(separator + 1) : stem;
@@ -284,8 +386,9 @@ namespace TexturePackEditor
                 if (!string.Equals(Path.GetDirectoryName(candidatePath)?.Replace('\\', '/'), set.Folder,
                         StringComparison.OrdinalIgnoreCase)) continue;
                 string candidateStem = Path.GetFileNameWithoutExtension(candidatePath);
-                if (!candidateStem.StartsWith(rolePrefix, StringComparison.OrdinalIgnoreCase)) continue;
                 if (IsGenerated(candidatePath, candidateStem, suffix)) continue;
+                candidateStem = StripResolutionSuffix(candidateStem);
+                if (!candidateStem.StartsWith(rolePrefix, StringComparison.OrdinalIgnoreCase)) continue;
                 string rawRole = candidateStem.Substring(rolePrefix.Length);
                 var texture = AssetDatabase.LoadAssetAtPath<Texture2D>(candidatePath);
                 if (texture == null) continue;
@@ -326,6 +429,10 @@ namespace TexturePackEditor
         }
 
         public string[] SortedRoles() => _detected.Keys.OrderBy(role => role).ToArray();
+
+        // Normalize only matching names; keep asset paths and generated-file checks untouched.
+        private static string StripResolutionSuffix(string stem)
+            => Regex.Replace(stem, @"_[1-9][0-9]*[kK]$", string.Empty);
 
         private static bool IsGenerated(string path, string stem, string suffix)
         {
