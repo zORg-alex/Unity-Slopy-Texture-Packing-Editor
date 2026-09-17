@@ -37,6 +37,8 @@ namespace TexturePackEditor
             bool retainNodeResults = true, bool takeOwnershipPreviousOutput = false,
             CancellationToken cancellationToken = default)
         {
+            session.PrepareHeights(output.channels.Where((channel, index) => (channelMask & (1 << index)) != 0)
+                .SelectMany(channel => channel.nodes), cancellationToken);
             var result = new TexturePackPreviewResult
             {
                 revision = revision,

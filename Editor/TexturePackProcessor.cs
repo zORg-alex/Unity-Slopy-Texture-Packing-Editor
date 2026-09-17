@@ -107,6 +107,24 @@ namespace TexturePackEditor
         {
             foreach (TexturePackNode node in nodes)
             {
+                if (node.type == TexturePackNodeType.Height)
+                {
+                    Texture2D source = _sources.Resolve(node);
+                    if (source == null) throw new InvalidOperationException("Choose a source texture for the Height node.");
+                    int limit = Mathf.Clamp(Mathf.ClosestPowerOfTwo(node.heightResolution), 128, 2048);
+                    float scale = Math.Min(1f, limit / (float)Math.Max(source.width, source.height));
+                    int width = Math.Max(2, Mathf.ClosestPowerOfTwo(Mathf.RoundToInt(source.width * scale)));
+                    int height = Math.Max(2, Mathf.ClosestPowerOfTwo(Mathf.RoundToInt(source.height * scale)));
+                    string path = AssetDatabase.GetAssetPath(source);
+                    node.heightInput = new TexturePackHeight.Input
+                    {
+                        pixels = ReadLinearCompact(source, width, height, new Rect(0, 0, 1, 1)),
+                        width = width, height = height,
+                        key = (string.IsNullOrEmpty(path) ? Guid.NewGuid().ToString("N") : path + ":" + AssetDatabase.GetAssetDependencyHash(path)) + ":" + width + ":" + height
+                    };
+                    _preparedNodes.Add(node);
+                    continue;
+                }
                 if (node.type != TexturePackNodeType.Sample || node.preparedPixels != null ||
                     node.preparedCompactPixels != null) continue;
                 Texture2D texture = _sources.Resolve(node);
@@ -137,12 +155,32 @@ namespace TexturePackEditor
             _prepared = true;
         }
 
+        public void PrepareHeights(IEnumerable<TexturePackNode> nodes, CancellationToken cancellationToken)
+        {
+            foreach (var node in nodes)
+            {
+                if (node.type != TexturePackNodeType.Height || node.preparedHeight != null) continue;
+                float[] map = TexturePackHeight.Build(node, cancellationToken);
+                var input = node.heightInput;
+                var sampled = new float[_width * _height];
+                for (int pixel = 0; pixel < sampled.Length; pixel++)
+                {
+                    if ((pixel & 4095) == 0) cancellationToken.ThrowIfCancellationRequested();
+                    Vector2 uv = PixelUv(pixel);
+                    sampled[pixel] = TexturePackHeight.Sample(map, input.width, input.height, uv.x, uv.y, node.heightSeamless);
+                }
+                node.preparedHeight = sampled;
+            }
+        }
+
         public void Dispose()
         {
             foreach (TexturePackNode node in _preparedNodes)
             {
                 node.preparedPixels = null;
                 node.preparedCompactPixels = null;
+                node.heightInput = null;
+                node.preparedHeight = null;
             }
             _preparedNodes.Clear();
             _pixels.Clear();
@@ -239,6 +277,10 @@ namespace TexturePackEditor
             outputScalar = scalar;
             switch (node.type)
             {
+                case TexturePackNodeType.Height:
+                    if (node.preparedHeight == null) throw new InvalidOperationException("Height map has not been prepared.");
+                    float height = Mathf.Clamp01((node.preparedHeight[pixel] - .5f) * node.heightStrength + node.heightCenter);
+                    return Blend(node, value, scalar, new Color(height, height, height, height), true, out outputScalar);
                 case TexturePackNodeType.Sample:
                 {
                     Color sample = session.Sample(node, pixel);
@@ -420,6 +462,7 @@ namespace TexturePackEditor
             CancellationToken cancellationToken = default)
         {
             if (plan == null || plan.session == null) throw new ArgumentNullException(nameof(plan));
+            plan.session.PrepareHeights(plan.output.channels.SelectMany(channel => channel.nodes), cancellationToken);
             int width = plan.Width;
             int height = plan.Height;
             var pixels = new Color32[checked(width * height)];

@@ -8,7 +8,8 @@ using UnityEngine;
 
 namespace TexturePackEditor
 {
-    public enum TexturePackNodeType { Sample, Desaturate, Levels, Noise, Invert, MultiplyAdd, Constant }
+    public enum TexturePackNodeType { Sample, Desaturate, Levels, Noise, Invert, MultiplyAdd, Constant, Height }
+    public enum TexturePackHeightMode { NormalIntegration }
     public enum TexturePackSourceKind { DetectedRole, ManualTexture }
     public enum TexturePackNoiseMode { Add, Multiply, Blend }
     public enum TexturePackBlendMode { Replace, Add, Subtract, Multiply, Screen, Overlay, Minimum, Maximum }
@@ -28,6 +29,14 @@ namespace TexturePackEditor
         public bool sampleDesaturate;
         public TexturePackBlendMode blendMode;
         public float blendAmount = 1;
+        public TexturePackHeightMode heightMode;
+        public int heightResolution = 1024;
+        public bool heightSeamless = true;
+        public bool heightFlipY;
+        public float heightStrength = 1;
+        public float heightCenter = .5f;
+        [NonSerialized] internal TexturePackHeight.Input heightInput;
+        [NonSerialized] internal float[] preparedHeight;
 
         public float desaturateAmount = 1;
         public float desaturateBlack;
@@ -66,6 +75,8 @@ namespace TexturePackEditor
                 manualTexture = manualTexture, channelMask = channelMask,
                 sampleDesaturate = sampleDesaturate,
                 blendMode = blendMode, blendAmount = blendAmount,
+                heightMode = heightMode, heightResolution = heightResolution, heightSeamless = heightSeamless,
+                heightFlipY = heightFlipY, heightStrength = heightStrength, heightCenter = heightCenter,
                 desaturateAmount = desaturateAmount, desaturateBlack = desaturateBlack,
                 desaturateWhite = desaturateWhite, luminanceRed = luminanceRed, luminanceGreen = luminanceGreen,
                 luminanceBlue = luminanceBlue, normalizeLuminance = normalizeLuminance,
@@ -78,7 +89,8 @@ namespace TexturePackEditor
 
         public static TexturePackNode Create(TexturePackNodeType nodeType)
         {
-            return new TexturePackNode { type = nodeType };
+            return new TexturePackNode { type = nodeType, sourceRole = nodeType == TexturePackNodeType.Height ? "normal" : null,
+                sourceRoleId = nodeType == TexturePackNodeType.Height ? "normal" : null };
         }
     }
 

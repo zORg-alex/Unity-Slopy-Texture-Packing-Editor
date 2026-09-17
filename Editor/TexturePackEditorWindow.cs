@@ -784,6 +784,9 @@ namespace TexturePackEditor
             EditorGUI.BeginChangeCheck();
             switch (node.type)
             {
+                case TexturePackNodeType.Height:
+                    DrawHeightSettings(node);
+                    break;
                 case TexturePackNodeType.Sample:
                     DrawSampleSettings(node);
                     break;
@@ -844,6 +847,12 @@ namespace TexturePackEditor
 
         private void DrawSampleSettings(TexturePackNode node)
         {
+            DrawSourceSettings(node);
+            DrawSampleChannels(node);
+        }
+
+        private void DrawSourceSettings(TexturePackNode node)
+        {
             node.sourceKind = (TexturePackSourceKind)EditorGUILayout.EnumPopup("Source", node.sourceKind);
             if (node.sourceKind == TexturePackSourceKind.DetectedRole)
             {
@@ -851,6 +860,24 @@ namespace TexturePackEditor
                 if (role != recipe.EffectiveRole(node)) node.sourceRoleId = role;
             }
             else node.manualTexture = (Texture2D)EditorGUILayout.ObjectField("Texture", node.manualTexture, typeof(Texture2D), false);
+        }
+
+        private void DrawHeightSettings(TexturePackNode node)
+        {
+            node.heightMode = (TexturePackHeightMode)EditorGUILayout.EnumPopup("Mode", node.heightMode);
+            DrawSourceSettings(node);
+            node.heightResolution = EditorGUILayout.IntPopup("Solve resolution", node.heightResolution,
+                new[] { "128", "256", "512", "1024", "2048" }, new[] { 128, 256, 512, 1024, 2048 });
+            node.heightSeamless = EditorGUILayout.Toggle("Seamless", node.heightSeamless);
+            node.heightFlipY = EditorGUILayout.Toggle("Flip normal Y", node.heightFlipY);
+            node.heightStrength = EditorGUILayout.Slider("Strength", node.heightStrength, -2, 2);
+            node.heightCenter = EditorGUILayout.Slider("Center", node.heightCenter, 0, 1);
+            DrawBlendSettings(node);
+            EditorGUILayout.HelpBox("Reads full RGB directly from its source. Reconstructs relative height; absolute depth is not stored in a normal map.", MessageType.Info);
+        }
+
+        private void DrawSampleChannels(TexturePackNode node)
+        {
             using (new EditorGUILayout.HorizontalScope())
             {
                 GUILayout.Label(new GUIContent("Channels",
@@ -911,7 +938,8 @@ namespace TexturePackEditor
             if (_sourceSet.ResolveRole(outputRole) == null && !_sourceSet.CanCreateEmptyRole(outputRole)) return false;
             foreach (TexturePackNode node in output.channels.SelectMany(channel => channel.nodes))
             {
-                if (node.type != TexturePackNodeType.Sample) continue;
+                if (node.type != TexturePackNodeType.Sample && node.type != TexturePackNodeType.Height) continue;
+                if (node.type == TexturePackNodeType.Height && _sourceSet.Resolve(node) == null) return false;
                 if (node.sourceKind == TexturePackSourceKind.ManualTexture)
                 {
                     if (node.manualTexture == null) return false;
@@ -960,6 +988,7 @@ namespace TexturePackEditor
         {
             EditorGUILayout.LabelField("Tools", EditorStyles.boldLabel);
             _toolsScroll = EditorGUILayout.BeginScrollView(_toolsScroll);
+            DrawTool(TexturePackNodeType.Height, "Height", "Reconstruct height from a full RGB source");
             DrawTool(TexturePackNodeType.Levels, "Levels", "Histogram, black, midpoint and white");
             DrawTool(TexturePackNodeType.Noise, "Noise", "Seeded procedural three-octave noise");
             DrawTool(TexturePackNodeType.Invert, "Invert", "Invert the current signal");
@@ -1933,7 +1962,8 @@ namespace TexturePackEditor
                     mask != 0 && (mask & (mask - 1)) == 0 ? ScalarSignal : mask;
                 return BlendSignal(node, input, source);
             }
-            if (node.type == TexturePackNodeType.Constant) return BlendSignal(node, input, ScalarSignal);
+            if (node.type == TexturePackNodeType.Constant || node.type == TexturePackNodeType.Height)
+                return BlendSignal(node, input, ScalarSignal);
             if (node.type == TexturePackNodeType.Desaturate &&
                 (input == ScalarSignal || node.desaturateAmount >= .999f)) return ScalarSignal;
             return input;
@@ -1994,6 +2024,7 @@ namespace TexturePackEditor
 
         private string NodeTitle(TexturePackNode node)
         {
+            if (node.type == TexturePackNodeType.Height) return "Height · " + SampleSourceName(node);
             if (node.type != TexturePackNodeType.Sample)
                 return node.type == TexturePackNodeType.MultiplyAdd ? "Multiply + Add" : node.type.ToString();
             string source = node.sourceKind == TexturePackSourceKind.DetectedRole
@@ -2004,6 +2035,7 @@ namespace TexturePackEditor
 
         private static string NodeTooltip(TexturePackNodeType type) => type switch
         {
+            TexturePackNodeType.Height => "Reconstructs scalar height from its own full RGB source, independently of incoming wires.",
             TexturePackNodeType.Sample => "Reads the enabled components from a detected or manually assigned texture.",
             TexturePackNodeType.Desaturate => "Uses Rec.709 luminance by default. Amount 1 produces one scalar; partial amounts keep separate channels.",
             TexturePackNodeType.Levels => "Remaps input black, midpoint, white, and output range.",
@@ -2032,6 +2064,7 @@ namespace TexturePackEditor
 
         private static Color NodeColor(TexturePackNodeType type) => type switch
         {
+            TexturePackNodeType.Height => new Color(.65f, .45f, .2f, .3f),
             TexturePackNodeType.Sample => new Color(.08f, .68f, .9f, .22f),
             TexturePackNodeType.Desaturate => new Color(.72f, .3f, .95f, .22f),
             TexturePackNodeType.Levels => new Color(1f, .63f, .08f, .22f),

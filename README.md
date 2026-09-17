@@ -127,3 +127,9 @@ the selected node owns the one full viewport-sized result, and caches are pruned
 Preview and export source capture use compact linear RGBA32 storage, matching the 8-bit-per-channel TGA output
 while avoiding the previous RGBAFloat memory spike. Closing the window cancels active work and destroys all
 preview, gradient, and editor-chrome textures immediately.
+
+### Height reconstruction
+
+The Height tool reads its own full RGB texture and outputs a scalar; sampler channel wires remain available. Normal Integration reconstructs relative height with a Fourier gradient solve. Choose Seamless for tiling textures or disable it for mirrored boundaries, and flip normal Y for the opposite normal convention. Strength (including negative values), Center and source blending control the result.
+
+Solve resolution caps the longest source dimension (128–2048). Preview and generation use the same full-image solve before cropping/resampling, so zooming does not change the height. Results are cached with source dependency hashes in a bounded 64 MB cache. Flat normals produce mid-gray. Absolute depth and missing large-scale shape cannot be recovered from normals. Current output remains 8-bit TGA.
