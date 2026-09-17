@@ -9,7 +9,7 @@ using UnityEngine;
 namespace TexturePackEditor
 {
     public enum TexturePackNodeType { Sample, Desaturate, Levels, Noise, Invert, MultiplyAdd, Constant, Height }
-    public enum TexturePackHeightMode { NormalIntegration, MultiscaleAlbedo }
+    public enum TexturePackHeightMode { NormalIntegration, MultiscaleAlbedo, DeepBump }
     public enum TexturePackSourceKind { DetectedRole, ManualTexture }
     public enum TexturePackNoiseMode { Add, Multiply, Blend }
     public enum TexturePackBlendMode { Replace, Add, Subtract, Multiply, Screen, Overlay, Minimum, Maximum }

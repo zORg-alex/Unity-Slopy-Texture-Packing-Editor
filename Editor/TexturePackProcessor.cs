@@ -118,6 +118,7 @@ namespace TexturePackEditor
                     string path = AssetDatabase.GetAssetPath(source);
                     node.heightInput = new TexturePackHeight.Input
                     {
+                        backend = node.heightMode == TexturePackHeightMode.DeepBump ? TexturePackDeepBump.Capture() : null,
                         pixels = ReadLinearCompact(source, width, height, new Rect(0, 0, 1, 1)),
                         width = width, height = height,
                         key = (string.IsNullOrEmpty(path) ? Guid.NewGuid().ToString("N") : path + ":" + AssetDatabase.GetAssetDependencyHash(path)) + ":" + width + ":" + height
@@ -369,6 +370,9 @@ namespace TexturePackEditor
         public static Texture2D CreateChannelPreview(TexturePackChannelStack stack, int lastNode,
             TexturePackPixelSession session)
         {
+            var nodes = stack.nodes.Take(lastNode + 1).ToArray();
+            session.Prepare(nodes);
+            session.PrepareHeights(nodes, default);
             var preview = new Texture2D(session.Width, session.Height, TextureFormat.RGBA32, false, true)
             { hideFlags = HideFlags.HideAndDontSave };
             var pixels = new Color32[session.Width * session.Height];
@@ -384,6 +388,9 @@ namespace TexturePackEditor
 
         public static Texture2D CreateOutputPreview(TexturePackOutput output, TexturePackPixelSession session)
         {
+            var nodes = output.channels.SelectMany(channel => channel.nodes).ToArray();
+            session.Prepare(nodes);
+            session.PrepareHeights(nodes, default);
             var preview = new Texture2D(session.Width, session.Height, TextureFormat.RGBA32, false, true)
             { hideFlags = HideFlags.HideAndDontSave };
             var pixels = new Color32[session.Width * session.Height];

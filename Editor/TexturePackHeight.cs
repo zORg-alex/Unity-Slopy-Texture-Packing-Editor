@@ -14,6 +14,7 @@ namespace TexturePackEditor
             internal Color32[] pixels;
             internal int width, height;
             internal string key;
+            internal TexturePackDeepBump.Configuration backend;
         }
 
         private static readonly object CacheLock = new();
@@ -30,7 +31,9 @@ namespace TexturePackEditor
             lock (CacheLock) if (Cache.TryGetValue(key, out var cached)) return cached;
             float[] map = node.heightMode == TexturePackHeightMode.MultiscaleAlbedo
                 ? Albedo(input.pixels, input.width, input.height, node, token)
-                : Integrate(input.pixels, input.width, input.height, node.heightSeamless, node.heightFlipY, token);
+                : Integrate(node.heightMode == TexturePackHeightMode.DeepBump
+                    ? TexturePackDeepBump.Infer(input, node.heightSeamless, token) : input.pixels,
+                    input.width, input.height, node.heightSeamless, node.heightFlipY, token);
             token.ThrowIfCancellationRequested();
             lock (CacheLock)
             {

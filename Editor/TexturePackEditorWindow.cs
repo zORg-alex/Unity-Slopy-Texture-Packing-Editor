@@ -71,6 +71,7 @@ namespace TexturePackEditor
         private CancellationTokenSource _previewCancellation;
         private TexturePackPixelSession _previewSession;
         private string _previewError;
+        private bool _deepBumpWasInstalling;
         private readonly ConcurrentQueue<GenerationProgress> _generationUpdates = new();
         private Task _generationTask;
         private CancellationTokenSource _generationCancellation;
@@ -340,10 +341,10 @@ namespace TexturePackEditor
                 EditorGUILayout.HelpBox("Unassigned: " +
                     string.Join(", ", _sourceSet.Unmatched.Select(texture => texture.name)), MessageType.Info);
             foreach (string error in _sourceSet?.Errors ?? Array.Empty<string>())
-                EditorGUILayout.HelpBox(error, MessageType.Warning);
+                DrawCopyableError(error);
 
             DrawLargePreview();
-            if (!string.IsNullOrEmpty(_previewError)) EditorGUILayout.HelpBox(_previewError, MessageType.Warning);
+            if (!string.IsNullOrEmpty(_previewError)) DrawCopyableError(_previewError);
         }
 
         private void DrawMaterialSlots()
@@ -876,6 +877,32 @@ namespace TexturePackEditor
             node.heightResolution = EditorGUILayout.IntPopup("Solve resolution", node.heightResolution,
                 new[] { "128", "256", "512", "1024", "2048" }, new[] { 128, 256, 512, 1024, 2048 });
             node.heightSeamless = EditorGUILayout.Toggle("Seamless", node.heightSeamless);
+            if (node.heightMode == TexturePackHeightMode.DeepBump)
+            {
+                if (!TexturePackDeepBump.Ready || TexturePackDeepBump.Installing)
+                {
+                    EditorGUILayout.HelpBox("One-time setup downloads the GPL-3.0 DeepBump model and a local CPU runtime. Requires Python 3.10–3.13.", MessageType.Info);
+                    string python = EditorGUILayout.TextField("Python", TexturePackDeepBump.Python);
+                    if (python != TexturePackDeepBump.Python) TexturePackDeepBump.Python = python;
+                    using (new EditorGUI.DisabledScope(TexturePackDeepBump.Installing))
+                        if (GUILayout.Button("Install DeepBump")) TexturePackDeepBump.Install();
+                    if (TexturePackDeepBump.Installing)
+                    {
+                        if (GUILayout.Button("Cancel setup")) TexturePackDeepBump.CancelSetup();
+                        Repaint();
+                    }
+                }
+                else
+                {
+                    EditorGUILayout.LabelField("DeepBump", "Ready · local CPU");
+                    if (GUILayout.Button("Repair DeepBump setup")) TexturePackDeepBump.Install();
+                }
+                if (!string.IsNullOrEmpty(TexturePackDeepBump.Status))
+                {
+                    if (TexturePackDeepBump.HasError) DrawCopyableError(TexturePackDeepBump.Status);
+                    else EditorGUILayout.HelpBox(TexturePackDeepBump.Status, MessageType.None);
+                }
+            }
             if (node.heightMode == TexturePackHeightMode.MultiscaleAlbedo)
             {
                 node.heightCoarse = EditorGUILayout.Slider("Coarse", node.heightCoarse, 0, 2);
@@ -889,6 +916,7 @@ namespace TexturePackEditor
             DrawBlendSettings(node);
             EditorGUILayout.HelpBox(node.heightMode == TexturePackHeightMode.MultiscaleAlbedo
                 ? "Estimates relief from brightness at several scales. Painted color and lighting can be mistaken for height."
+                : node.heightMode == TexturePackHeightMode.DeepBump ? "Predicts normals from albedo, then integrates them into relative height. Processing stays on this computer."
                 : "Reads full RGB directly from its source. Reconstructs relative height; absolute depth is not stored in a normal map.", MessageType.Info);
         }
 
@@ -916,6 +944,26 @@ namespace TexturePackEditor
         {
             node.blendMode = (TexturePackBlendMode)EditorGUILayout.EnumPopup("Blend", node.blendMode);
             node.blendAmount = EditorGUILayout.Slider("Blend amount", node.blendAmount, 0, 1);
+        }
+
+        private void DrawCopyableError(string message)
+        {
+            string display = message;
+            if (display.Length > 400)
+            {
+                string[] lines = display.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                display = lines.Length > 0 ? lines[lines.Length - 1] : display;
+                if (display.Length > 400) display = display.Substring(0, 397) + "…";
+            }
+            EditorGUILayout.HelpBox(display + "\nClick to copy the full error.", MessageType.Warning);
+            Rect rect = GUILayoutUtility.GetLastRect();
+            EditorGUIUtility.AddCursorRect(rect, MouseCursor.Link);
+            if (Event.current.type == EventType.MouseDown && Event.current.button == 0 && rect.Contains(Event.current.mousePosition))
+            {
+                EditorGUIUtility.systemCopyBuffer = message;
+                ShowNotification(new GUIContent("Error copied to clipboard"));
+                Event.current.Use();
+            }
         }
 
         private string DrawRolePopup(string label, string roleId)
@@ -1557,7 +1605,11 @@ namespace TexturePackEditor
             if (exception != null)
             {
                 Debug.LogException(exception);
-                EditorUtility.DisplayDialog("Texture Pack Editor", exception.Message, "OK");
+                if (EditorUtility.DisplayDialog("Texture Pack Editor", exception.Message, "Copy error", "Close"))
+                {
+                    EditorGUIUtility.systemCopyBuffer = exception.Message;
+                    ShowNotification(new GUIContent("Error copied to clipboard"));
+                }
             }
             else if (cancelled) ShowNotification(new GUIContent("Texture generation cancelled"));
             else if (_generationLastPath != null)
@@ -1586,6 +1638,9 @@ namespace TexturePackEditor
 
         private void PreviewUpdate()
         {
+            bool installing = TexturePackDeepBump.Installing;
+            if (_deepBumpWasInstalling && !installing && TexturePackDeepBump.Ready) Changed();
+            _deepBumpWasInstalling = installing;
             GenerationUpdate();
             while (_previewUpdates.TryDequeue(out TexturePackPreviewUpdate update))
                 if (update.revision == _previewRevision) ApplyPreviewUpdate(update);
