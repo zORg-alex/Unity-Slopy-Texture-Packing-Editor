@@ -1,5 +1,9 @@
 # Texture Pack Editor
 
+Samplers include an optional Desaturate section with luminance weights, amount, and range. Full desaturation
+produces a scalar; disabled or partial desaturation can retain multiple selected channels and their wires.
+The standalone Desaturate tool is removed from the shelf, but existing recipe nodes still work unchanged.
+
 Open `Tools > Texture Pack Editor` to use the currently selected texture, Material, or Terrain Layer as the initial input.
 Later Project selection changes do not change the editor. Drag another texture, Material, or Terrain Layer into the input
 field, or use the refresh button to adopt the current Project selection. Additional textures can be added manually.

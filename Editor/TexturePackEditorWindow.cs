@@ -863,6 +863,8 @@ namespace TexturePackEditor
                 }
             }
             if (node.channelMask == 0) EditorGUILayout.HelpBox("Enable at least one channel.", MessageType.Warning);
+            node.sampleDesaturate = EditorGUILayout.Toggle("Desaturate", node.sampleDesaturate);
+            if (node.sampleDesaturate) DrawDesaturateSettings(node);
         }
 
         private string DrawRolePopup(string label, string roleId)
@@ -950,7 +952,6 @@ namespace TexturePackEditor
         {
             EditorGUILayout.LabelField("Tools", EditorStyles.boldLabel);
             _toolsScroll = EditorGUILayout.BeginScrollView(_toolsScroll);
-            DrawTool(TexturePackNodeType.Desaturate, "Desaturate", "Editable luminance weights and range");
             DrawTool(TexturePackNodeType.Levels, "Levels", "Histogram, black, midpoint and white");
             DrawTool(TexturePackNodeType.Noise, "Noise", "Seeded procedural three-octave noise");
             DrawTool(TexturePackNodeType.Invert, "Invert", "Invert the current signal");
@@ -1920,6 +1921,7 @@ namespace TexturePackEditor
             if (node.type == TexturePackNodeType.Sample)
             {
                 int mask = node.channelMask & 15;
+                if (node.sampleDesaturate && node.desaturateAmount >= .999f) return ScalarSignal;
                 return mask != 0 && (mask & (mask - 1)) == 0 ? ScalarSignal : mask;
             }
             if (node.type == TexturePackNodeType.Constant) return ScalarSignal;
@@ -1981,7 +1983,7 @@ namespace TexturePackEditor
             string source = node.sourceKind == TexturePackSourceKind.DetectedRole
                 ? TexturePackProjectSettings.instance.DisplayName(recipe.EffectiveRole(node)) :
                 node.manualTexture == null ? "Missing" : node.manualTexture.name;
-            return "Sample " + source + "." + MaskName(node.channelMask);
+            return "Sample " + source + "." + MaskName(node.channelMask) + (node.sampleDesaturate ? " → Gray" : "");
         }
 
         private static string NodeTooltip(TexturePackNodeType type) => type switch

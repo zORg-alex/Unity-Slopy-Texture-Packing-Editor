@@ -247,24 +247,16 @@ namespace TexturePackEditor
                     {
                         float component = mask switch { 1 => sample.r, 2 => sample.g, 4 => sample.b, _ => sample.a };
                         outputScalar = true;
-                        return new Color(component, component, component, component);
+                        Color selected = new(component, component, component, component);
+                        return node.sampleDesaturate ? Desaturate(node, selected, true, out outputScalar) : selected;
                     }
                     outputScalar = false;
-                    return new Color((mask & 1) != 0 ? sample.r : 0, (mask & 2) != 0 ? sample.g : 0,
+                    Color channels = new((mask & 1) != 0 ? sample.r : 0, (mask & 2) != 0 ? sample.g : 0,
                         (mask & 4) != 0 ? sample.b : 0, (mask & 8) != 0 ? sample.a : 0);
+                    return node.sampleDesaturate ? Desaturate(node, channels, false, out outputScalar) : channels;
                 }
                 case TexturePackNodeType.Desaturate:
-                {
-                    float weight = node.normalizeLuminance
-                        ? Mathf.Max(0.0001f, node.luminanceRed + node.luminanceGreen + node.luminanceBlue)
-                        : 1;
-                    float luminance = (value.r * node.luminanceRed + value.g * node.luminanceGreen +
-                                       value.b * node.luminanceBlue) / weight;
-                    luminance = Mathf.Lerp(node.desaturateBlack, node.desaturateWhite, luminance);
-                    Color gray = new(luminance, luminance, luminance, luminance);
-                    outputScalar = scalar || node.desaturateAmount >= 0.999f;
-                    return Color.Lerp(value, gray, node.desaturateAmount);
-                }
+                    return Desaturate(node, value, scalar, out outputScalar);
                 case TexturePackNodeType.Levels:
                     return Map(value, component => Levels(component, node));
                 case TexturePackNodeType.Noise:
@@ -288,6 +280,16 @@ namespace TexturePackEditor
                 default:
                     return value;
             }
+        }
+
+        private static Color Desaturate(TexturePackNode node, Color value, bool scalar, out bool outputScalar)
+        {
+            float weight = node.normalizeLuminance
+                ? Mathf.Max(.0001f, node.luminanceRed + node.luminanceGreen + node.luminanceBlue) : 1;
+            float luminance = (value.r * node.luminanceRed + value.g * node.luminanceGreen + value.b * node.luminanceBlue) / weight;
+            luminance = Mathf.Lerp(node.desaturateBlack, node.desaturateWhite, luminance);
+            outputScalar = scalar || node.desaturateAmount >= .999f;
+            return Color.Lerp(value, new Color(luminance, luminance, luminance, luminance), node.desaturateAmount);
         }
 
         public static Texture2D CreateChannelPreview(TexturePackChannelStack stack, int lastNode,

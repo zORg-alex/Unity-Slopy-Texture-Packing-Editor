@@ -24,6 +24,7 @@ namespace TexturePackEditor
         public string sourceRoleId;
         public Texture2D manualTexture;
         public int channelMask = 1;
+        public bool sampleDesaturate;
 
         public float desaturateAmount = 1;
         public float desaturateBlack;
@@ -60,6 +61,7 @@ namespace TexturePackEditor
                 type = type, expanded = expanded, sourceKind = sourceKind, sourceRole = sourceRole,
                 sourceRoleId = sourceRoleId,
                 manualTexture = manualTexture, channelMask = channelMask,
+                sampleDesaturate = sampleDesaturate,
                 desaturateAmount = desaturateAmount, desaturateBlack = desaturateBlack,
                 desaturateWhite = desaturateWhite, luminanceRed = luminanceRed, luminanceGreen = luminanceGreen,
                 luminanceBlue = luminanceBlue, normalizeLuminance = normalizeLuminance,
