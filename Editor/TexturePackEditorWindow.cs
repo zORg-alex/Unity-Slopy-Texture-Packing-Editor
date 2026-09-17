@@ -54,6 +54,8 @@ namespace TexturePackEditor
         private readonly Dictionary<string, float[]> _histograms = new();
         private readonly Dictionary<string, AnimBool> _nodeAnimations = new();
         private readonly ConcurrentQueue<TexturePackPreviewUpdate> _previewUpdates = new();
+        private readonly Dictionary<string, double> _pendingPreviewNodes = new();
+        private double _lastSpinnerRepaint;
         private Texture2D _largePreview;
         private Color32[] _lastOutputPixels;
         private Vector2 _sourceScroll;
@@ -168,6 +170,7 @@ namespace TexturePackEditor
             _generationCancellation?.Cancel();
             DestroyPreviews();
             ClearPreviewUpdates();
+            _pendingPreviewNodes.Clear();
             if (_previewTask == null) _previewSession?.Dispose();
             else
             {
@@ -737,8 +740,11 @@ namespace TexturePackEditor
                 float available = header.xMax - 70 - x;
                 if (available < 30) break;
                 float width = Mathf.Min(available, Mathf.Min(180, style.CalcSize(content).x + 12));
+                bool waiting = NodePreviewBusy(node.id, EditorApplication.timeSinceStartup);
+                if (waiting) width = Mathf.Min(available, width + 18);
                 Rect pill = new(x, header.y + 8, width, 18);
-                GUI.Label(pill, content, style);
+                GUI.Label(pill, waiting ? new GUIContent(icon + "   ", content.tooltip) : content, style);
+                if (waiting) DrawPreviewSpinner(new Rect(pill.xMax - 17, pill.y + 1, 16, 16));
                 x += width + 4;
             }
         }
@@ -760,8 +766,10 @@ namespace TexturePackEditor
                     animation.target = node.expanded;
                     MarkRecipeDirty();
                 }
-                GUI.Label(new Rect(header.x + 25, header.y + 4, header.width - 54, 20),
+                GUI.Label(new Rect(header.x + 25, header.y + 4, header.width - 76, 20),
                     new GUIContent(NodeTitle(node), NodeTooltip(node.type)), EditorStyles.boldLabel);
+                if (NodePreviewBusy(node.id, EditorApplication.timeSinceStartup))
+                    DrawPreviewSpinner(new Rect(header.xMax - 43, header.y + 5, 16, 16));
                 if (GUI.Button(remove, "×", EditorStyles.miniButton))
                 {
                     ActiveOutput.channels[channel].nodes.RemoveAt(index);
@@ -1644,6 +1652,7 @@ namespace TexturePackEditor
             if (recipe != null && recipe != _transientRecipe) EditorUtility.SetDirty(recipe);
             _previewDirty = true;
             _previewDirtyChannels |= (channelMask & 15) | _previewInFlightChannels;
+            MarkPendingPreviews(_previewDirtyChannels);
             _previewRevision++;
             _previewCancellation?.Cancel();
             _previewDue = EditorApplication.timeSinceStartup + PreviewDebounce;
@@ -1658,6 +1667,12 @@ namespace TexturePackEditor
 
         private void PreviewUpdate()
         {
+            double now = EditorApplication.timeSinceStartup;
+            if (now - _lastSpinnerRepaint >= .08 && _pendingPreviewNodes.Values.Any(start => now - start >= .2))
+            {
+                _lastSpinnerRepaint = now;
+                Repaint();
+            }
             bool installing = TexturePackDeepBump.Installing;
             if (_deepBumpWasInstalling && !installing && TexturePackDeepBump.Ready) Changed();
             _deepBumpWasInstalling = installing;
@@ -1670,7 +1685,10 @@ namespace TexturePackEditor
                 try
                 {
                     if (_previewTask.IsFaulted)
+                    {
                         _previewError = _previewTask.Exception?.GetBaseException().Message;
+                        if (!_previewDirty) _pendingPreviewNodes.Clear();
+                    }
                 }
                 finally
                 {
@@ -1689,7 +1707,11 @@ namespace TexturePackEditor
 
         private void StartPreview()
         {
-            if (!HasInput || recipe == null || recipe.outputs.Count == 0) return;
+            if (!HasInput || recipe == null || recipe.outputs.Count == 0)
+            {
+                _pendingPreviewNodes.Clear();
+                return;
+            }
             _previewDirty = false;
             _previewError = null;
             try
@@ -1701,6 +1723,7 @@ namespace TexturePackEditor
                 if (_lastOutputPixels == null || _lastOutputPixels.Length != previewResolution * previewResolution)
                     channelMask = 15;
                 _previewInFlightChannels = channelMask;
+                MarkPendingPreviews(channelMask);
                 _previewDirtyChannels = 0;
                 _previewSession = new TexturePackPixelSession(_sourceSet, previewResolution, previewResolution,
                     PreviewUvRect(), compact: true);
@@ -1726,6 +1749,7 @@ namespace TexturePackEditor
             catch (Exception exception)
             {
                 _previewError = exception.Message;
+                _pendingPreviewNodes.Clear();
                 _previewDirtyChannels |= _previewInFlightChannels;
                 _previewInFlightChannels = 0;
                 _previewSession?.Dispose();
@@ -1743,6 +1767,7 @@ namespace TexturePackEditor
             }
             else
             {
+                _pendingPreviewNodes.Remove(update.nodeId);
                 _nodePreviews.TryGetValue(update.nodeId, out Texture2D previous);
                 _nodePreviewPixels[update.nodeId] = update.pixels;
                 Color32[] thumbnail = DownsampleOpaque(update.pixels, update.width, update.height, 96,
@@ -1760,6 +1785,8 @@ namespace TexturePackEditor
         private void PrunePreviewCaches(TexturePackOutput output)
         {
             var valid = new HashSet<string>(output.channels.SelectMany(stack => stack.nodes).Select(node => node.id));
+            foreach (string id in _pendingPreviewNodes.Keys.Where(id => !valid.Contains(id)).ToArray())
+                _pendingPreviewNodes.Remove(id);
             foreach (string id in _nodePreviews.Keys.Where(id => !valid.Contains(id)).ToArray())
             {
                 if (_nodePreviews[id] != null) DestroyImmediate(_nodePreviews[id]);
@@ -2020,6 +2047,25 @@ namespace TexturePackEditor
             };
             CollapsedNodeStyles[key] = style;
             return style;
+        }
+
+        private void MarkPendingPreviews(int channelMask)
+        {
+            if (recipe == null || recipe.outputs.Count == 0) return;
+            double now = EditorApplication.timeSinceStartup;
+            foreach (var node in ActiveOutput.channels.Where((channel, index) => (channelMask & (1 << index)) != 0)
+                         .SelectMany(channel => channel.nodes))
+                if (!_pendingPreviewNodes.ContainsKey(node.id)) _pendingPreviewNodes.Add(node.id, now);
+        }
+
+        private bool NodePreviewBusy(string nodeId, double now)
+            => _pendingPreviewNodes.TryGetValue(nodeId, out double started) && now - started >= .2;
+
+        private static void DrawPreviewSpinner(Rect rect)
+        {
+            int frame = (int)(EditorApplication.timeSinceStartup * 12) % 12;
+            var icon = EditorGUIUtility.IconContent("WaitSpin" + frame.ToString("00"));
+            GUI.Label(rect, new GUIContent(icon.image, "Updating preview…"));
         }
 
         private static Texture2D CreateRoundedTexture(Color color, int radius, bool squareBottom)
