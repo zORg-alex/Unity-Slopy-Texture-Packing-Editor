@@ -805,6 +805,7 @@ namespace TexturePackEditor
                     break;
                 case TexturePackNodeType.Constant:
                     node.constant = DrawColoredSlider("Value", node.constant, Color.white, node.id + ":constant");
+                    DrawBlendSettings(node);
                     break;
             }
             if (EditorGUI.EndChangeCheck())
@@ -865,6 +866,13 @@ namespace TexturePackEditor
             if (node.channelMask == 0) EditorGUILayout.HelpBox("Enable at least one channel.", MessageType.Warning);
             node.sampleDesaturate = EditorGUILayout.Toggle("Desaturate", node.sampleDesaturate);
             if (node.sampleDesaturate) DrawDesaturateSettings(node);
+            DrawBlendSettings(node);
+        }
+
+        private static void DrawBlendSettings(TexturePackNode node)
+        {
+            node.blendMode = (TexturePackBlendMode)EditorGUILayout.EnumPopup("Blend", node.blendMode);
+            node.blendAmount = EditorGUILayout.Slider("Blend amount", node.blendAmount, 0, 1);
         }
 
         private string DrawRolePopup(string label, string roleId)
@@ -1921,13 +1929,21 @@ namespace TexturePackEditor
             if (node.type == TexturePackNodeType.Sample)
             {
                 int mask = node.channelMask & 15;
-                if (node.sampleDesaturate && node.desaturateAmount >= .999f) return ScalarSignal;
-                return mask != 0 && (mask & (mask - 1)) == 0 ? ScalarSignal : mask;
+                int source = node.sampleDesaturate && node.desaturateAmount >= .999f ||
+                    mask != 0 && (mask & (mask - 1)) == 0 ? ScalarSignal : mask;
+                return BlendSignal(node, input, source);
             }
-            if (node.type == TexturePackNodeType.Constant) return ScalarSignal;
+            if (node.type == TexturePackNodeType.Constant) return BlendSignal(node, input, ScalarSignal);
             if (node.type == TexturePackNodeType.Desaturate &&
                 (input == ScalarSignal || node.desaturateAmount >= .999f)) return ScalarSignal;
             return input;
+        }
+
+        private static int BlendSignal(TexturePackNode node, int input, int source)
+        {
+            if (node.blendAmount <= 0) return input;
+            if (node.blendMode == TexturePackBlendMode.Replace && node.blendAmount >= 1) return source;
+            return (input == 0 || input == ScalarSignal) && source == ScalarSignal ? ScalarSignal : 15;
         }
 
         private static void DrawSignalWires(Rect rect, int signal)

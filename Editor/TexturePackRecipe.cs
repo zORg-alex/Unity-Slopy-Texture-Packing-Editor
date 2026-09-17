@@ -11,6 +11,7 @@ namespace TexturePackEditor
     public enum TexturePackNodeType { Sample, Desaturate, Levels, Noise, Invert, MultiplyAdd, Constant }
     public enum TexturePackSourceKind { DetectedRole, ManualTexture }
     public enum TexturePackNoiseMode { Add, Multiply, Blend }
+    public enum TexturePackBlendMode { Replace, Add, Subtract, Multiply, Screen, Overlay, Minimum, Maximum }
 
     [Serializable]
     public sealed class TexturePackNode
@@ -25,6 +26,8 @@ namespace TexturePackEditor
         public Texture2D manualTexture;
         public int channelMask = 1;
         public bool sampleDesaturate;
+        public TexturePackBlendMode blendMode;
+        public float blendAmount = 1;
 
         public float desaturateAmount = 1;
         public float desaturateBlack;
@@ -62,6 +65,7 @@ namespace TexturePackEditor
                 sourceRoleId = sourceRoleId,
                 manualTexture = manualTexture, channelMask = channelMask,
                 sampleDesaturate = sampleDesaturate,
+                blendMode = blendMode, blendAmount = blendAmount,
                 desaturateAmount = desaturateAmount, desaturateBlack = desaturateBlack,
                 desaturateWhite = desaturateWhite, luminanceRed = luminanceRed, luminanceGreen = luminanceGreen,
                 luminanceBlue = luminanceBlue, normalizeLuminance = normalizeLuminance,

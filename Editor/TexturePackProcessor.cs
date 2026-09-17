@@ -248,12 +248,14 @@ namespace TexturePackEditor
                         float component = mask switch { 1 => sample.r, 2 => sample.g, 4 => sample.b, _ => sample.a };
                         outputScalar = true;
                         Color selected = new(component, component, component, component);
-                        return node.sampleDesaturate ? Desaturate(node, selected, true, out outputScalar) : selected;
+                        if (node.sampleDesaturate) selected = Desaturate(node, selected, true, out outputScalar);
+                        return Blend(node, value, scalar, selected, outputScalar, out outputScalar);
                     }
                     outputScalar = false;
                     Color channels = new((mask & 1) != 0 ? sample.r : 0, (mask & 2) != 0 ? sample.g : 0,
                         (mask & 4) != 0 ? sample.b : 0, (mask & 8) != 0 ? sample.a : 0);
-                    return node.sampleDesaturate ? Desaturate(node, channels, false, out outputScalar) : channels;
+                    if (node.sampleDesaturate) channels = Desaturate(node, channels, false, out outputScalar);
+                    return Blend(node, value, scalar, channels, outputScalar, out outputScalar);
                 }
                 case TexturePackNodeType.Desaturate:
                     return Desaturate(node, value, scalar, out outputScalar);
@@ -276,10 +278,40 @@ namespace TexturePackEditor
                     return value * node.multiply + new Color(node.add, node.add, node.add, node.add);
                 case TexturePackNodeType.Constant:
                     outputScalar = true;
-                    return new Color(node.constant, node.constant, node.constant, node.constant);
+                    return Blend(node, value, scalar, new Color(node.constant, node.constant, node.constant, node.constant),
+                        true, out outputScalar);
                 default:
                     return value;
             }
+        }
+
+        public static Color Blend(TexturePackNode node, Color input, bool inputScalar, Color layer, bool layerScalar,
+            out bool outputScalar)
+        {
+            float amount = Mathf.Clamp01(node.blendAmount);
+            outputScalar = amount <= 0 ? inputScalar : node.blendMode == TexturePackBlendMode.Replace && amount >= 1
+                ? layerScalar : inputScalar && layerScalar;
+            if (amount <= 0) return input;
+            if (node.blendMode == TexturePackBlendMode.Replace && amount >= 1) return layer;
+            if (inputScalar) input = new Color(input.r, input.r, input.r, input.r);
+            Color result = default;
+            for (int channel = 0; channel < 4; channel++)
+            {
+                float a = input[channel], b = layer[channel];
+                float blended = node.blendMode switch
+                {
+                    TexturePackBlendMode.Add => a + b,
+                    TexturePackBlendMode.Subtract => a - b,
+                    TexturePackBlendMode.Multiply => a * b,
+                    TexturePackBlendMode.Screen => 1 - (1 - a) * (1 - b),
+                    TexturePackBlendMode.Overlay => a <= .5f ? 2 * a * b : 1 - 2 * (1 - a) * (1 - b),
+                    TexturePackBlendMode.Minimum => Mathf.Min(a, b),
+                    TexturePackBlendMode.Maximum => Mathf.Max(a, b),
+                    _ => b
+                };
+                result[channel] = Mathf.LerpUnclamped(a, blended, amount);
+            }
+            return result;
         }
 
         private static Color Desaturate(TexturePackNode node, Color value, bool scalar, out bool outputScalar)
