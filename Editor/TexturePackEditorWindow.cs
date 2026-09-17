@@ -491,10 +491,13 @@ namespace TexturePackEditor
             if (showSelectedNode && !string.IsNullOrEmpty(_lastSelectedId))
                 _nodePreviewPixels.TryGetValue(_lastSelectedId, out source);
             else source = _lastOutputPixels;
-            if (_largePreview != null) DestroyImmediate(_largePreview);
             int size = source == null ? 0 : Mathf.RoundToInt(Mathf.Sqrt(source.Length));
-            _largePreview = source == null ? null : CreatePreviewTexture(size, size,
-                DisplayPixels(source, previewDisplayChannel));
+            if (source == null)
+            {
+                if (_largePreview != null) DestroyImmediate(_largePreview);
+                _largePreview = null;
+            }
+            else _largePreview = UpdatePreviewTexture(_largePreview, size, size, DisplayPixels(source, previewDisplayChannel));
             Repaint();
         }
 
@@ -1723,12 +1726,11 @@ namespace TexturePackEditor
             }
             else
             {
-                if (_nodePreviews.TryGetValue(update.nodeId, out Texture2D previous) && previous != null)
-                    DestroyImmediate(previous);
+                _nodePreviews.TryGetValue(update.nodeId, out Texture2D previous);
                 _nodePreviewPixels[update.nodeId] = update.pixels;
                 Color32[] thumbnail = DownsampleOpaque(update.pixels, update.width, update.height, 96,
                     out int thumbnailWidth, out int thumbnailHeight);
-                _nodePreviews[update.nodeId] = CreatePreviewTexture(thumbnailWidth, thumbnailHeight, thumbnail);
+                _nodePreviews[update.nodeId] = UpdatePreviewTexture(previous, thumbnailWidth, thumbnailHeight, thumbnail);
                 if (update.histogram != null)
                 {
                     _histograms[update.nodeId] = update.histogram;
@@ -1752,12 +1754,16 @@ namespace TexturePackEditor
                 _histograms.Remove(id);
         }
 
-        private static Texture2D CreatePreviewTexture(int width, int height, Color32[] pixels)
+        private static Texture2D UpdatePreviewTexture(Texture2D texture, int width, int height, Color32[] pixels)
         {
-            var texture = new Texture2D(width, height, TextureFormat.RGBA32, false, true)
-            { name = "TexturePackEditor Preview", hideFlags = HideFlags.HideAndDontSave };
+            if (texture == null || texture.width != width || texture.height != height)
+            {
+                if (texture != null) DestroyImmediate(texture);
+                texture = new Texture2D(width, height, TextureFormat.RGBA32, false, true)
+                { name = "TexturePackEditor Preview", hideFlags = HideFlags.HideAndDontSave };
+            }
             texture.SetPixels32(pixels);
-            texture.Apply(false, true);
+            texture.Apply(false, false);
             return texture;
         }
 

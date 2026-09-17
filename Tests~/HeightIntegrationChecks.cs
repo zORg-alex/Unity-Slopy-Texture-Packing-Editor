@@ -76,6 +76,8 @@ public static class HeightIntegrationChecks
                 node.heightResolution = 256;
                 using var session = new TexturePackPixelSession(sources, 64, 64, new Rect(0, 0, 1, 1), true);
                 session.Prepare(new[] { node });
+                node.heightInput.backend = TexturePackDeepBump.Capture();
+                node.heightInput.pixels = pixels;
                 using var cancellation = new CancellationTokenSource();
                 cancellation.CancelAfter(50);
                 try { Task.Run(() => TexturePackDeepBump.Infer(node.heightInput, true, cancellation.Token)).GetAwaiter().GetResult(); throw new Exception("DeepBump cancellation ignored"); }

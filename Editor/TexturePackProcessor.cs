@@ -118,11 +118,16 @@ namespace TexturePackEditor
                     string path = AssetDatabase.GetAssetPath(source);
                     node.heightInput = new TexturePackHeight.Input
                     {
-                        backend = node.heightMode == TexturePackHeightMode.DeepBump ? TexturePackDeepBump.Capture() : null,
-                        pixels = ReadLinearCompact(source, width, height, new Rect(0, 0, 1, 1)),
                         width = width, height = height,
                         key = (string.IsNullOrEmpty(path) ? Guid.NewGuid().ToString("N") : path + ":" + AssetDatabase.GetAssetDependencyHash(path)) + ":" + width + ":" + height
                     };
+                    // Center/strength/blend changes only remap the solved image. Pin the cached
+                    // array for this job before skipping capture, even if the shared cache evicts it.
+                    if (!TexturePackHeight.TryCaptureCachedMap(node, node.heightInput))
+                    {
+                        node.heightInput.backend = node.heightMode == TexturePackHeightMode.DeepBump ? TexturePackDeepBump.Capture() : null;
+                        node.heightInput.pixels = ReadLinearCompact(source, width, height, new Rect(0, 0, 1, 1));
+                    }
                     _preparedNodes.Add(node);
                     continue;
                 }

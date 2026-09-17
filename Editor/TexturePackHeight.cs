@@ -14,6 +14,7 @@ namespace TexturePackEditor
             internal Color32[] pixels;
             internal int width, height;
             internal string key;
+            internal float[] cachedMap;
             internal TexturePackDeepBump.Configuration backend;
         }
 
@@ -22,12 +23,22 @@ namespace TexturePackEditor
         private static readonly Queue<string> CacheOrder = new();
         private static long cacheBytes;
 
+        private static string CacheKey(TexturePackNode node, Input input) =>
+            input.key + ":" + node.heightMode + ":" + node.heightSeamless + ":" + node.heightFlipY +
+            ":" + node.heightCoarse.ToString("R", CultureInfo.InvariantCulture) + ":" + node.heightMedium.ToString("R", CultureInfo.InvariantCulture) +
+            ":" + node.heightFine.ToString("R", CultureInfo.InvariantCulture) + ":" + node.heightRemoveLighting;
+
+        internal static bool TryCaptureCachedMap(TexturePackNode node, Input input)
+        {
+            lock (CacheLock) return Cache.TryGetValue(CacheKey(node, input), out input.cachedMap);
+        }
+
         internal static float[] Build(TexturePackNode node, CancellationToken token)
         {
             Input input = node.heightInput ?? throw new InvalidOperationException("Height source was not captured.");
-            string key = input.key + ":" + node.heightMode + ":" + node.heightSeamless + ":" + node.heightFlipY +
-                ":" + node.heightCoarse.ToString("R", CultureInfo.InvariantCulture) + ":" + node.heightMedium.ToString("R", CultureInfo.InvariantCulture) +
-                ":" + node.heightFine.ToString("R", CultureInfo.InvariantCulture) + ":" + node.heightRemoveLighting;
+            token.ThrowIfCancellationRequested();
+            if (input.cachedMap != null) return input.cachedMap;
+            string key = CacheKey(node, input);
             lock (CacheLock) if (Cache.TryGetValue(key, out var cached)) return cached;
             float[] map = node.heightMode == TexturePackHeightMode.MultiscaleAlbedo
                 ? Albedo(input.pixels, input.width, input.height, node, token)
