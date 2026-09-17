@@ -864,16 +864,32 @@ namespace TexturePackEditor
 
         private void DrawHeightSettings(TexturePackNode node)
         {
+            var previousMode = node.heightMode;
             node.heightMode = (TexturePackHeightMode)EditorGUILayout.EnumPopup("Mode", node.heightMode);
+            if (node.heightMode != previousMode && node.sourceKind == TexturePackSourceKind.DetectedRole)
+            {
+                string role = node.heightMode == TexturePackHeightMode.NormalIntegration ? "normal" : "basemap";
+                node.sourceRoleId = role;
+                node.sourceRole = role;
+            }
             DrawSourceSettings(node);
             node.heightResolution = EditorGUILayout.IntPopup("Solve resolution", node.heightResolution,
                 new[] { "128", "256", "512", "1024", "2048" }, new[] { 128, 256, 512, 1024, 2048 });
             node.heightSeamless = EditorGUILayout.Toggle("Seamless", node.heightSeamless);
-            node.heightFlipY = EditorGUILayout.Toggle("Flip normal Y", node.heightFlipY);
+            if (node.heightMode == TexturePackHeightMode.MultiscaleAlbedo)
+            {
+                node.heightCoarse = EditorGUILayout.Slider("Coarse", node.heightCoarse, 0, 2);
+                node.heightMedium = EditorGUILayout.Slider("Medium", node.heightMedium, 0, 2);
+                node.heightFine = EditorGUILayout.Slider("Fine", node.heightFine, 0, 2);
+                node.heightRemoveLighting = EditorGUILayout.Toggle("Remove broad lighting", node.heightRemoveLighting);
+            }
+            else node.heightFlipY = EditorGUILayout.Toggle("Flip normal Y", node.heightFlipY);
             node.heightStrength = EditorGUILayout.Slider("Strength", node.heightStrength, -2, 2);
             node.heightCenter = EditorGUILayout.Slider("Center", node.heightCenter, 0, 1);
             DrawBlendSettings(node);
-            EditorGUILayout.HelpBox("Reads full RGB directly from its source. Reconstructs relative height; absolute depth is not stored in a normal map.", MessageType.Info);
+            EditorGUILayout.HelpBox(node.heightMode == TexturePackHeightMode.MultiscaleAlbedo
+                ? "Estimates relief from brightness at several scales. Painted color and lighting can be mistaken for height."
+                : "Reads full RGB directly from its source. Reconstructs relative height; absolute depth is not stored in a normal map.", MessageType.Info);
         }
 
         private void DrawSampleChannels(TexturePackNode node)

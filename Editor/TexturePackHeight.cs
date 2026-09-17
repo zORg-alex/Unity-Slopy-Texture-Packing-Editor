@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Threading;
 using UnityEngine;
 
@@ -23,9 +24,13 @@ namespace TexturePackEditor
         internal static float[] Build(TexturePackNode node, CancellationToken token)
         {
             Input input = node.heightInput ?? throw new InvalidOperationException("Height source was not captured.");
-            string key = input.key + ":" + node.heightMode + ":" + node.heightSeamless + ":" + node.heightFlipY;
+            string key = input.key + ":" + node.heightMode + ":" + node.heightSeamless + ":" + node.heightFlipY +
+                ":" + node.heightCoarse.ToString("R", CultureInfo.InvariantCulture) + ":" + node.heightMedium.ToString("R", CultureInfo.InvariantCulture) +
+                ":" + node.heightFine.ToString("R", CultureInfo.InvariantCulture) + ":" + node.heightRemoveLighting;
             lock (CacheLock) if (Cache.TryGetValue(key, out var cached)) return cached;
-            float[] map = Integrate(input.pixels, input.width, input.height, node.heightSeamless, node.heightFlipY, token);
+            float[] map = node.heightMode == TexturePackHeightMode.MultiscaleAlbedo
+                ? Albedo(input.pixels, input.width, input.height, node, token)
+                : Integrate(input.pixels, input.width, input.height, node.heightSeamless, node.heightFlipY, token);
             token.ThrowIfCancellationRequested();
             lock (CacheLock)
             {
@@ -51,6 +56,78 @@ namespace TexturePackEditor
             public static Complex operator +(Complex a, Complex b) => new(a.r + b.r, a.i + b.i);
             public static Complex operator -(Complex a, Complex b) => new(a.r - b.r, a.i - b.i);
             public static Complex operator *(Complex a, Complex b) => new(a.r * b.r - a.i * b.i, a.r * b.i + a.i * b.r);
+        }
+
+        public static float[] Albedo(Color32[] pixels, int width, int height, TexturePackNode node,
+            CancellationToken token = default)
+        {
+            if (pixels == null || pixels.Length != width * height || width < 1 || height < 1)
+                throw new ArgumentException("Albedo dimensions do not match the pixels.");
+            var luminance = new float[pixels.Length];
+            double sum = 0;
+            for (int i = 0; i < pixels.Length; i++)
+            {
+                if ((i & 4095) == 0) token.ThrowIfCancellationRequested();
+                Color32 c = pixels[i];
+                luminance[i] = (.2126f * c.r + .7152f * c.g + .0722f * c.b) / 255f;
+                sum += luminance[i];
+            }
+            int size = Math.Min(width, height);
+            var fine = Blur(luminance, width, height, Math.Max(1, size / 256), node.heightSeamless, token);
+            var medium = Blur(luminance, width, height, Math.Max(2, size / 64), node.heightSeamless, token);
+            var broad = node.heightRemoveLighting
+                ? Blur(luminance, width, height, Math.Max(4, size / 16), node.heightSeamless, token) : null;
+            float mean = (float)(sum / pixels.Length);
+            for (int i = 0; i < luminance.Length; i++)
+            {
+                if ((i & 4095) == 0) token.ThrowIfCancellationRequested();
+                luminance[i] = node.heightFine * (luminance[i] - fine[i]) +
+                    node.heightMedium * (fine[i] - medium[i]) +
+                    node.heightCoarse * (medium[i] - (broad == null ? mean : broad[i]));
+            }
+            Normalize(luminance);
+            return luminance;
+        }
+
+        // Three separable box passes approximate a Gaussian, with cost independent of radius.
+        private static float[] Blur(float[] source, int width, int height, int radius, bool wrap, CancellationToken token)
+        {
+            var data = (float[])source.Clone();
+            var temporary = new float[data.Length];
+            int diameter = radius * 2 + 1;
+            for (int pass = 0; pass < 3; pass++)
+            {
+                for (int y = 0; y < height; y++)
+                {
+                    token.ThrowIfCancellationRequested();
+                    double sum = 0;
+                    for (int x = -radius; x <= radius; x++) sum += data[y * width + Boundary(x, width, wrap)];
+                    for (int x = 0; x < width; x++)
+                    {
+                        temporary[y * width + x] = (float)(sum / diameter);
+                        sum += data[y * width + Boundary(x + radius + 1, width, wrap)] - data[y * width + Boundary(x - radius, width, wrap)];
+                    }
+                }
+                for (int x = 0; x < width; x++)
+                {
+                    token.ThrowIfCancellationRequested();
+                    double sum = 0;
+                    for (int y = -radius; y <= radius; y++) sum += temporary[Boundary(y, height, wrap) * width + x];
+                    for (int y = 0; y < height; y++)
+                    {
+                        data[y * width + x] = (float)(sum / diameter);
+                        sum += temporary[Boundary(y + radius + 1, height, wrap) * width + x] - temporary[Boundary(y - radius, height, wrap) * width + x];
+                    }
+                }
+            }
+            return data;
+        }
+
+        private static int Boundary(int i, int count, bool wrap)
+        {
+            if (wrap) return Index(i, count, true);
+            int reflected = (i % (2 * count) + 2 * count) % (2 * count);
+            return reflected < count ? reflected : 2 * count - reflected - 1;
         }
 
         public static float[] Integrate(Color32[] normals, int width, int height, bool seamless, bool flipY,

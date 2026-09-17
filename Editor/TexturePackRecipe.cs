@@ -9,7 +9,7 @@ using UnityEngine;
 namespace TexturePackEditor
 {
     public enum TexturePackNodeType { Sample, Desaturate, Levels, Noise, Invert, MultiplyAdd, Constant, Height }
-    public enum TexturePackHeightMode { NormalIntegration }
+    public enum TexturePackHeightMode { NormalIntegration, MultiscaleAlbedo }
     public enum TexturePackSourceKind { DetectedRole, ManualTexture }
     public enum TexturePackNoiseMode { Add, Multiply, Blend }
     public enum TexturePackBlendMode { Replace, Add, Subtract, Multiply, Screen, Overlay, Minimum, Maximum }
@@ -35,6 +35,10 @@ namespace TexturePackEditor
         public bool heightFlipY;
         public float heightStrength = 1;
         public float heightCenter = .5f;
+        public float heightCoarse = 1;
+        public float heightMedium = .5f;
+        public float heightFine = .25f;
+        public bool heightRemoveLighting = true;
         [NonSerialized] internal TexturePackHeight.Input heightInput;
         [NonSerialized] internal float[] preparedHeight;
 
@@ -77,6 +81,8 @@ namespace TexturePackEditor
                 blendMode = blendMode, blendAmount = blendAmount,
                 heightMode = heightMode, heightResolution = heightResolution, heightSeamless = heightSeamless,
                 heightFlipY = heightFlipY, heightStrength = heightStrength, heightCenter = heightCenter,
+                heightCoarse = heightCoarse, heightMedium = heightMedium, heightFine = heightFine,
+                heightRemoveLighting = heightRemoveLighting,
                 desaturateAmount = desaturateAmount, desaturateBlack = desaturateBlack,
                 desaturateWhite = desaturateWhite, luminanceRed = luminanceRed, luminanceGreen = luminanceGreen,
                 luminanceBlue = luminanceBlue, normalizeLuminance = normalizeLuminance,
