@@ -592,6 +592,19 @@ namespace TexturePackEditor
                 if (!string.IsNullOrEmpty(terrainPath))
                     EditorGUILayout.LabelField("Replacing", Path.GetFileName(terrainPath));
                 if (EditorGUI.EndChangeCheck()) MarkRecipeDirty();
+                if (_sourceSet?.CanCreateEmptyRole(recipe.EffectiveOutputRole(output)) == true)
+                {
+                    int[] sizes = _sourceSet.EmptySlotSizes();
+                    int current = _sourceSet.EmptySlotResolution(output);
+                    EditorGUI.BeginChangeCheck();
+                    int chosen = EditorGUILayout.Popup("Resolution", Array.IndexOf(sizes, current),
+                        sizes.Select(size => size + " × " + size).ToArray());
+                    if (EditorGUI.EndChangeCheck())
+                    {
+                        output.emptySlotSize = sizes[chosen];
+                        MarkRecipeDirty();
+                    }
+                }
             }
 
             _outputScroll = EditorGUILayout.BeginScrollView(_outputScroll);
@@ -884,7 +897,8 @@ namespace TexturePackEditor
         private bool IsOutputResolved(TexturePackOutput output)
         {
             if (_sourceSet == null || output == null) return false;
-            if (_sourceSet.ResolveRole(recipe.EffectiveOutputRole(output)) == null) return false;
+            string outputRole = recipe.EffectiveOutputRole(output);
+            if (_sourceSet.ResolveRole(outputRole) == null && !_sourceSet.CanCreateEmptyRole(outputRole)) return false;
             foreach (TexturePackNode node in output.channels.SelectMany(channel => channel.nodes))
             {
                 if (node.type != TexturePackNodeType.Sample) continue;
@@ -892,7 +906,8 @@ namespace TexturePackEditor
                 {
                     if (node.manualTexture == null) return false;
                 }
-                else if (_sourceSet.ResolveRole(recipe.EffectiveRole(node)) == null) return false;
+                else if (_sourceSet.ResolveRole(recipe.EffectiveRole(node)) == null &&
+                         !_sourceSet.CanCreateEmptyRole(recipe.EffectiveRole(node))) return false;
             }
             return true;
         }
@@ -1286,7 +1301,8 @@ namespace TexturePackEditor
             for (int index = 0; index < recipe.outputs.Count; index++)
             {
                 TexturePackOutput output = recipe.outputs[index];
-                if (_sourceSet.ResolveRole(recipe.EffectiveOutputRole(output)) == null) continue;
+                if (_sourceSet.ResolveRole(recipe.EffectiveOutputRole(output)) == null &&
+                    !_sourceSet.CanCreateEmptyRole(recipe.EffectiveOutputRole(output))) continue;
                 string candidate = TexturePackProcessor.OutputCandidate(recipe, output, _sourceSet, suffix);
                 string terrainPath = _sourceSet.BoundOverwritePath(recipe.EffectiveOutputRole(output));
                 if (!reserved.Contains(candidate) &&
@@ -1304,8 +1320,10 @@ namespace TexturePackEditor
                 }
                 TexturePackOutput proposed = output.Clone(true);
                 string baseName = string.IsNullOrWhiteSpace(output.outputFileName)
-                    ? Path.GetFileNameWithoutExtension(AssetDatabase.GetAssetPath(
-                        _sourceSet.ResolveRole(recipe.EffectiveOutputRole(output)))) : output.outputFileName;
+                    ? _sourceSet.CanCreateEmptyRole(recipe.EffectiveOutputRole(output))
+                        ? _sourceSet.Prefix + "_" + recipe.EffectiveOutputRole(output)
+                        : Path.GetFileNameWithoutExtension(AssetDatabase.GetAssetPath(
+                            _sourceSet.ResolveRole(recipe.EffectiveOutputRole(output)))) : output.outputFileName;
                 int number = 2;
                 string unique;
                 do

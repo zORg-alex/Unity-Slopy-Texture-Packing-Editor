@@ -56,6 +56,23 @@ namespace TexturePackEditor
                     " texture changed during generation. The generated file was saved, but the material was not changed.");
             Undo.RecordObject(material, "Apply generated material texture");
             material.SetTexture(property, texture);
+            if (expected == null || string.IsNullOrEmpty(AssetDatabase.GetAssetPath(expected)))
+            {
+                string keywordName = property switch
+                {
+                    "_MaskMap" => "_MASKMAP",
+                    "_BumpMap" or "_NormalMap" => "_NORMALMAP",
+                    "_OcclusionMap" => "_OCCLUSIONMAP",
+                    "_SpecGlossMap" => "_SPECGLOSSMAP",
+                    "_MetallicGlossMap" => "_METALLICGLOSSMAP",
+                    _ => null
+                };
+                if (keywordName != null)
+                {
+                    var keyword = shader.keywordSpace.FindKeyword(keywordName);
+                    if (keyword.isValid) material.EnableKeyword(keyword);
+                }
+            }
             EditorUtility.SetDirty(material);
             AssetDatabase.SaveAssetIfDirty(material);
         }

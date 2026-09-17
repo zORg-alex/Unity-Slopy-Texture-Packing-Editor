@@ -12,8 +12,18 @@ when multiple properties match. **None** disables a role; **Automatic** restores
 apply to the current material input and reset when switching materials. Only assigned project Texture2D
 assets become sources; shader defaults, cubemaps, and texture arrays are not exported.
 
+Empty Material and Terrain Layer slots can be generated when a Basemap is assigned. Add an output for the
+empty role and use its **Resolution** popup to choose a square power-of-two size, up to the shorter side of
+the base map. The default is the largest allowed size. The chosen size is saved in the recipe and captured
+when generation starts. Empty mask outputs start with neutral RGBA values (0, 1, 1, 0); empty normals start
+flat. Existing sampler nodes referencing the empty role use the same neutral input. Mask outputs import
+as linear data, and normal outputs as normal maps. Generated empty-slot results remember their neutral
+origin, so regeneration does not compound earlier edits. Their resolution remains editable on later runs.
+
 A new unsaved material recipe starts with one output for each detected role. Generation assigns each result
-to that role's captured shader property, preserving texture scale, offset, keywords, and other material settings.
+to that role's captured shader property, preserving texture scale, offset, and other material settings.
+When filling an empty standard texture slot, its texture keyword is enabled if the shader declares one;
+existing populated slots retain their keyword settings.
 Existing generated assignments are overwritten in place, with original source recovery just like Terrain Layers.
 The material, shader, property names, and existing assignments are captured at the start of the job. You can
 move on to another material or Terrain Layer while it runs; the completed textures still apply to the original

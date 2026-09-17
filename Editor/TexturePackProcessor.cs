@@ -15,6 +15,8 @@ namespace TexturePackEditor
         internal TexturePackPixelSession session;
         internal string outputPath;
         internal string sourcePath;
+        internal string templatePath;
+        internal bool emptySlot;
         internal string recipeGuid;
         internal bool encodeSrgb;
         internal TerrainLayer terrainLayer;
@@ -76,13 +78,13 @@ namespace TexturePackEditor
                 if (_compact)
                 {
                     Color32[] prepared = node.preparedCompactPixels;
-                    return prepared != null ? prepared[pixel] : Color.black;
+                    return prepared != null ? prepared[pixel] : node.preparedFallback;
                 }
                 Color[] preparedFloat = node.preparedPixels;
-                return preparedFloat != null ? preparedFloat[pixel] : Color.black;
+                return preparedFloat != null ? preparedFloat[pixel] : node.preparedFallback;
             }
             Texture2D texture = _sources.Resolve(node);
-            if (texture == null) return Color.black;
+            if (texture == null) return _sources.EmptyRoleSample(node);
             if (_compact)
             {
                 if (!_compactPixels.TryGetValue(texture, out var compactColors))
@@ -108,7 +110,11 @@ namespace TexturePackEditor
                 if (node.type != TexturePackNodeType.Sample || node.preparedPixels != null ||
                     node.preparedCompactPixels != null) continue;
                 Texture2D texture = _sources.Resolve(node);
-                if (texture == null) continue;
+                if (texture == null)
+                {
+                    node.preparedFallback = _sources.EmptyRoleSample(node);
+                    continue;
+                }
                 if (_compact)
                 {
                     if (!_compactPixels.TryGetValue(texture, out var compactColors))
@@ -329,6 +335,8 @@ namespace TexturePackEditor
             TexturePackSourceSet sources = sourceSnapshot ?? TexturePackSourceSet.Detect(anchor, recipe);
             string outputRole = recipe.EffectiveOutputRole(output);
             Texture2D outputBase = sources.ResolveRole(outputRole);
+            bool emptySlot = outputBase == null && sources.CanCreateEmptyRole(outputRole);
+            if (emptySlot) outputBase = sources.ResolveRole("basemap");
             if (outputBase == null) throw new InvalidOperationException("Output-base role is unresolved: " +
                                                                         TexturePackProjectSettings.instance.DisplayName(outputRole));
             string basePath = AssetDatabase.GetAssetPath(outputBase);
@@ -339,9 +347,10 @@ namespace TexturePackEditor
                     ". Choose a different File name and generate again.");
             string outputPath = candidate;
             var outputImporter = AssetImporter.GetAtPath(basePath) as TextureImporter;
-            bool outputSrgb = outputImporter != null && outputImporter.sRGBTexture;
-            int width = outputBase.width;
-            int height = outputBase.height;
+            bool outputSrgb = emptySlot ? outputRole == "basemap" || outputRole == "specular" :
+                outputImporter != null && outputImporter.sRGBTexture;
+            int width = emptySlot ? sources.EmptySlotResolution(output) : outputBase.width;
+            int height = emptySlot ? width : outputBase.height;
             var session = new TexturePackPixelSession(sources, width, height, new Rect(0, 0, 1, 1), true);
             try
             {
@@ -352,7 +361,9 @@ namespace TexturePackEditor
                     output = snapshot,
                     session = session,
                     outputPath = outputPath,
-                    sourcePath = basePath,
+                    sourcePath = emptySlot ? null : basePath,
+                    templatePath = basePath,
+                    emptySlot = emptySlot,
                     recipeGuid = recipeGuid,
                     terrainLayer = sources.TerrainLayer,
                     terrainRole = outputRole,
@@ -419,8 +430,8 @@ namespace TexturePackEditor
             if (recipe == null) throw new ArgumentNullException(nameof(recipe));
             AssetDatabase.ImportAsset(plan.outputPath,
                 ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
-            ConfigureImporter(plan.outputPath, AssetImporter.GetAtPath(plan.sourcePath) as TextureImporter,
-                plan.recipeGuid, plan.output.id, plan.sourcePath);
+            ConfigureImporter(plan.outputPath, AssetImporter.GetAtPath(plan.templatePath) as TextureImporter,
+                plan.recipeGuid, plan.output.id, plan.sourcePath, plan.emptySlot ? plan.terrainRole : null);
             if (plan.terrainLayer != null)
                 TexturePackTerrainBinding.Apply(plan.terrainLayer, plan.terrainRole,
                     AssetDatabase.LoadAssetAtPath<Texture2D>(plan.outputPath), plan.terrainAssignment);
@@ -512,7 +523,7 @@ namespace TexturePackEditor
         }
 
         private static void ConfigureImporter(string path, TextureImporter template, string recipeGuid, string outputId,
-            string sourcePath)
+            string sourcePath, string emptyRole = null)
         {
             var importer = (TextureImporter)AssetImporter.GetAtPath(path);
             if (template != null)
@@ -529,9 +540,15 @@ namespace TexturePackEditor
                 importer.maxTextureSize = template.maxTextureSize;
                 importer.npotScale = template.npotScale;
             }
+            if (emptyRole != null)
+            {
+                importer.textureType = emptyRole == "normal" ? TextureImporterType.NormalMap : TextureImporterType.Default;
+                importer.sRGBTexture = emptyRole == "basemap" || emptyRole == "specular";
+                importer.alphaIsTransparency = false;
+            }
             // Keep the original source GUID so terrain bindings can regenerate without compounding edits.
-            string originalGuid = path == sourcePath ? GeneratedSourceGuid(importer.userData) :
-                AssetDatabase.AssetPathToGUID(sourcePath);
+            string originalGuid = emptyRole != null ? "empty" : path == sourcePath ? GeneratedSourceGuid(importer.userData) :
+                string.IsNullOrEmpty(sourcePath) ? string.Empty : AssetDatabase.AssetPathToGUID(sourcePath);
             importer.userData = GeneratedMarker + recipeGuid + ":" + outputId + ":" + originalGuid;
             importer.SaveAndReimport();
         }
@@ -556,11 +573,15 @@ namespace TexturePackEditor
             if (!string.IsNullOrEmpty(reuse)) return reuse;
             suffix = SanitizeSuffix(suffix);
             if (string.IsNullOrEmpty(suffix)) throw new InvalidOperationException("Safe output suffix cannot be empty.");
-            Texture2D texture = sources.ResolveRole(recipe.EffectiveOutputRole(output));
+            string role = recipe.EffectiveOutputRole(output);
+            Texture2D texture = sources.ResolveRole(role);
+            bool emptySlot = texture == null && sources.CanCreateEmptyRole(role);
+            if (emptySlot) texture = sources.ResolveRole("basemap");
             if (texture == null) throw new InvalidOperationException("Output base is unresolved.");
             string path = AssetDatabase.GetAssetPath(texture);
             string name = string.IsNullOrWhiteSpace(output.outputFileName)
-                ? Path.GetFileNameWithoutExtension(path) : SanitizeFileName(output.outputFileName);
+                ? emptySlot ? SanitizeFileName(sources.Prefix + "_" + role) : Path.GetFileNameWithoutExtension(path)
+                : SanitizeFileName(output.outputFileName);
             return Path.Combine(Path.GetDirectoryName(path) ?? "Assets", name + suffix + ".tga").Replace('\\', '/');
         }
 
@@ -569,6 +590,9 @@ namespace TexturePackEditor
 
         public static bool IsGeneratedTexture(Texture2D texture)
             => texture != null && IsGeneratedMarker(AssetImporter.GetAtPath(AssetDatabase.GetAssetPath(texture))?.userData);
+
+        public static bool IsEmptySlotTexture(Texture2D texture)
+            => texture != null && GeneratedSourceGuid(AssetImporter.GetAtPath(AssetDatabase.GetAssetPath(texture))?.userData) == "empty";
 
         private static string GeneratedSourceGuid(string marker)
         {

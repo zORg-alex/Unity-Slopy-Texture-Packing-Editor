@@ -50,6 +50,7 @@ namespace TexturePackEditor
 
         [NonSerialized] internal Color[] preparedPixels;
         [NonSerialized] internal Color32[] preparedCompactPixels;
+        [NonSerialized] internal Color preparedFallback = Color.black;
 
         public TexturePackNode Clone(bool preserveId = false)
         {
@@ -91,6 +92,7 @@ namespace TexturePackEditor
         public string outputBaseRoleId;
         [Tooltip("Optional file name without an extension. Empty uses the base texture name.")]
         public string outputFileName;
+        public int emptySlotSize;
         public List<TexturePackChannelStack> channels = new();
         [HideInInspector] public string lastGeneratedPath;
 
@@ -111,6 +113,14 @@ namespace TexturePackEditor
             };
             output.EnsureChannels();
             for (int channel = 0; channel < 4; channel++)
+            {
+                if (sourceSet != null && sourceSet.CanCreateEmptyRole(role))
+                {
+                    float value = role == "normal" ? (channel < 2 ? .5f : 1f) :
+                        role == "maskmap" ? (channel == 1 || channel == 2 ? 1f : 0f) : (channel == 3 ? 1f : 0f);
+                    output.channels[channel].nodes.Add(new TexturePackNode { type = TexturePackNodeType.Constant, constant = value });
+                    continue;
+                }
                 output.channels[channel].nodes.Add(new TexturePackNode
                 {
                     type = TexturePackNodeType.Sample,
@@ -119,6 +129,7 @@ namespace TexturePackEditor
                     sourceRoleId = role ?? sourceSet?.AnchorRole,
                     channelMask = 1 << channel
                 });
+            }
             return output;
         }
 
@@ -131,6 +142,7 @@ namespace TexturePackEditor
                 outputBaseRole = outputBaseRole,
                 outputBaseRoleId = outputBaseRoleId,
                 outputFileName = outputFileName,
+                emptySlotSize = emptySlotSize,
                 channels = channels.Select(stack => new TexturePackChannelStack
                 {
                     expanded = stack.expanded,
@@ -272,6 +284,36 @@ namespace TexturePackEditor
         public string BoundSlot(string role)
             => TerrainLayer != null && TexturePackTerrainBinding.Supports(role) ? role : MaterialProperty(role);
 
+        public bool CanCreateEmptyRole(string role)
+            => ResolveRole(role) == null && BoundSlot(role) != null && ResolveRole("basemap") != null &&
+               !_conflicts.ContainsKey(role);
+
+        public int[] EmptySlotSizes()
+        {
+            Texture2D basemap = ResolveRole("basemap");
+            if (basemap == null) return Array.Empty<int>();
+            int limit = Mathf.Min(basemap.width, basemap.height);
+            var sizes = new List<int>();
+            for (int size = 1; size <= limit; size *= 2) sizes.Add(size);
+            return sizes.ToArray();
+        }
+
+        public Color EmptyRoleSample(TexturePackNode node)
+        {
+            string role = _recipe != null ? _recipe.EffectiveRole(node) : node.sourceRoleId ?? node.sourceRole;
+            if (node.sourceKind != TexturePackSourceKind.DetectedRole || !CanCreateEmptyRole(role)) return Color.black;
+            return role == "normal" ? new Color(.5f, .5f, 1, 1) :
+                role == "maskmap" ? new Color(0, 1, 1, 0) : Color.black;
+        }
+
+        public int EmptySlotResolution(TexturePackOutput output)
+        {
+            int[] sizes = EmptySlotSizes();
+            if (sizes.Length == 0) throw new InvalidOperationException("Assign a base map before creating an empty texture slot.");
+            int requested = output.emptySlotSize > 0 ? output.emptySlotSize : sizes[^1];
+            return sizes.Last(size => size <= Mathf.Max(1, requested));
+        }
+
         public string BoundOverwritePath(string role)
         {
             Texture2D assigned = BoundAssignment(role);
@@ -290,7 +332,7 @@ namespace TexturePackEditor
             {
                 Texture2D assigned = TexturePackTerrainBinding.GetTexture(layer, role);
                 set._boundAssignments[role] = assigned;
-                if (assigned == null) continue;
+                if (assigned == null || TexturePackProcessor.IsEmptySlotTexture(assigned)) continue;
                 // The layer slots are authoritative, independent of filenames and role matching rules.
                 set._detected[role] = TexturePackProcessor.OriginalTexture(assigned);
                 set.AnchorRole ??= role;
@@ -329,10 +371,16 @@ namespace TexturePackEditor
                         !string.IsNullOrEmpty(AssetDatabase.GetAssetPath(texture)) &&
                         string.Equals(TexturePackMaterialBinding.RoleForProperty(name, recipe), role.id,
                             StringComparison.OrdinalIgnoreCase)).ToArray();
+                    if (candidates.Length == 0)
+                        candidates = properties.Where(name =>
+                            (material.GetTexture(name) == null || material.GetTexture(name) is Texture2D defaultTexture &&
+                                string.IsNullOrEmpty(AssetDatabase.GetAssetPath(defaultTexture))) &&
+                            string.Equals(TexturePackMaterialBinding.RoleForProperty(name, recipe), role.id,
+                                StringComparison.OrdinalIgnoreCase)).ToArray();
                     if (candidates.Length == 0) continue;
                     if (candidates.Length > 1)
                     {
-                        set._conflicts[role.id] = candidates.Select(name => (Texture2D)material.GetTexture(name)).ToList();
+                        set._conflicts[role.id] = candidates.Select(name => material.GetTexture(name) as Texture2D).ToList();
                         set._errors.Add(role.name + " matches " + string.Join(", ", candidates) +
                             ". Choose its texture slot under Material slots.");
                         continue;
@@ -342,7 +390,8 @@ namespace TexturePackEditor
                 set._materialProperties[role.id] = property;
                 var assigned = material.GetTexture(property) as Texture2D;
                 set._boundAssignments[role.id] = assigned;
-                if (assigned == null || string.IsNullOrEmpty(AssetDatabase.GetAssetPath(assigned))) continue;
+                if (assigned == null || string.IsNullOrEmpty(AssetDatabase.GetAssetPath(assigned)) ||
+                    TexturePackProcessor.IsEmptySlotTexture(assigned)) continue;
                 set._detected[role.id] = TexturePackProcessor.OriginalTexture(assigned);
                 if (set.AnchorRole == null || role.id == "basemap") set.AnchorRole = role.id;
             }
