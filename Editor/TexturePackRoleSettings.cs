@@ -194,9 +194,9 @@ namespace TexturePackEditor
                 return;
             }
             var window = _openWindow = CreateInstance<TexturePackRoleSettingsWindow>();
-            window.titleContent = new GUIContent("Texture Roles");
+            window.titleContent = new GUIContent("Texture Pack Settings");
             window._changed = changed;
-            float height = Mathf.Clamp(54 + TexturePackProjectSettings.instance.Roles.Count * 31, 116, 300);
+            float height = Mathf.Clamp(114 + TexturePackProjectSettings.instance.Roles.Count * 31, 176, 360);
             window.ShowAsDropDown(activatorRect, new Vector2(620, height));
         }
 
@@ -207,6 +207,12 @@ namespace TexturePackEditor
             TexturePackProjectSettings settings = TexturePackProjectSettings.instance;
             settings.EnsureDefaults();
             _scroll = EditorGUILayout.BeginScrollView(_scroll);
+            EditorGUILayout.LabelField("Generation", EditorStyles.boldLabel);
+            string suffix = EditorPrefs.GetString(TexturePackEditorWindow.SuffixKey, "_Wet");
+            EditorGUI.BeginChangeCheck();
+            suffix = EditorGUILayout.DelayedTextField("Safe output suffix", suffix);
+            if (EditorGUI.EndChangeCheck()) EditorPrefs.SetString(TexturePackEditorWindow.SuffixKey, suffix);
+            EditorGUILayout.Space(6);
             DrawProjectRoles(settings);
             EditorGUILayout.EndScrollView();
         }

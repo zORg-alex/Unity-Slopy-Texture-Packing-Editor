@@ -13,7 +13,7 @@ namespace TexturePackEditor
 {
     public sealed class TexturePackEditorWindow : EditorWindow
     {
-        private const string SuffixKey = "TexturePackEditor.SafeOutputSuffix";
+        internal const string SuffixKey = "TexturePackEditor.SafeOutputSuffix";
         private const string DragKey = "TexturePackEditor.DragPayload";
         private const int ScalarSignal = 16;
         private const double PreviewDebounce = 0.18;
@@ -153,6 +153,7 @@ namespace TexturePackEditor
 
         private void OnEnable()
         {
+            Undo.undoRedoPerformed += RecipeUndoRedo;
             EditorApplication.update += PreviewUpdate;
             EnsureRecipe();
             RefreshSourceSet(false);
@@ -160,6 +161,7 @@ namespace TexturePackEditor
 
         private void OnDisable()
         {
+            Undo.undoRedoPerformed -= RecipeUndoRedo;
             EditorApplication.update -= PreviewUpdate;
             EditorApplication.delayCall -= StartNextGenerationOutput;
             _previewCancellation?.Cancel();
@@ -207,6 +209,7 @@ namespace TexturePackEditor
         private void OnGUI()
         {
             EnsureRecipe();
+            RecordRecipeUndo();
             if (Event.current.type == EventType.Layout) PruneNodeAnimations();
             HandleKeyboard();
             DrawGenerationProgress();
@@ -220,6 +223,20 @@ namespace TexturePackEditor
                 using (new EditorGUILayout.VerticalScope(GUILayout.Width(220))) DrawToolsColumn();
             }
             DrawDragGhost();
+        }
+
+        private void RecordRecipeUndo()
+        {
+            if (recipe != null) Undo.RecordObject(recipe, "Edit texture recipe");
+        }
+
+        private void RecipeUndoRedo()
+        {
+            if (recipe == null) return;
+            recipe.EnsureOutputs();
+            activeOutput = Mathf.Clamp(activeOutput, 0, recipe.outputs.Count - 1);
+            RefreshSourceSet(false);
+            Changed();
         }
 
         private void DrawGenerationProgress()
@@ -259,7 +276,7 @@ namespace TexturePackEditor
                     RefreshSourceSet(recipe == _transientRecipe);
                 }
                 GUIContent settings = EditorGUIUtility.IconContent("d_Settings");
-                settings.tooltip = "Edit project role rules.";
+                settings.tooltip = "Edit texture roles and generation settings.";
                 if (GUILayout.Button(settings, EditorStyles.miniButton, GUILayout.Width(26), GUILayout.Height(20)))
                     TexturePackRoleSettingsWindow.Open(GUIUtility.GUIToScreenRect(GUILayoutUtility.GetLastRect()), () =>
                     {
@@ -297,10 +314,6 @@ namespace TexturePackEditor
             }
 
             if (sourceMaterial != null) DrawMaterialSlots();
-            string suffix = EditorPrefs.GetString(SuffixKey, "_Wet");
-            EditorGUI.BeginChangeCheck();
-            suffix = EditorGUILayout.TextField("Safe suffix", suffix);
-            if (EditorGUI.EndChangeCheck()) EditorPrefs.SetString(SuffixKey, suffix);
 
             if (terrainLayer != null || sourceMaterial != null)
                 EditorGUILayout.HelpBox("Generation updates the " + (sourceMaterial != null ? "Material" : "Terrain Layer") +
@@ -785,6 +798,7 @@ namespace TexturePackEditor
 
         private void DrawNodeSettings(TexturePackNode node, int channel)
         {
+            RecordRecipeUndo();
             EditorGUI.BeginChangeCheck();
             switch (node.type)
             {
