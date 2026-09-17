@@ -896,24 +896,27 @@ namespace TexturePackEditor
             node.heightSeamless = EditorGUILayout.Toggle("Seamless", node.heightSeamless);
             if (node.heightMode == TexturePackHeightMode.DeepBump)
             {
-                if (!TexturePackDeepBump.Ready || TexturePackDeepBump.Installing)
+                TexturePackDeepBump.CheckInstallation();
+                bool busy = TexturePackDeepBump.Installing || TexturePackDeepBump.Checking || TexturePackDeepBump.Cleaning;
+                EditorGUILayout.LabelField("DeepBump", TexturePackDeepBump.Checking ? "Checking installation…" :
+                    TexturePackDeepBump.Healthy ? "Ready · local CPU" : "Setup or repair required");
+                using (new EditorGUI.DisabledScope(busy))
                 {
-                    EditorGUILayout.HelpBox("One-time setup downloads the GPL-3.0 DeepBump model and a local CPU runtime. Requires Python 3.10–3.13.", MessageType.Info);
-                    string python = EditorGUILayout.TextField("Python", TexturePackDeepBump.Python);
+                    string python = EditorGUILayout.TextField("Setup Python", TexturePackDeepBump.Python);
                     if (python != TexturePackDeepBump.Python) TexturePackDeepBump.Python = python;
-                    using (new EditorGUI.DisabledScope(TexturePackDeepBump.Installing))
-                        if (GUILayout.Button("Install DeepBump")) TexturePackDeepBump.Install();
-                    if (TexturePackDeepBump.Installing)
+                    if (GUILayout.Button("Choose Python…"))
                     {
-                        if (GUILayout.Button("Cancel setup")) TexturePackDeepBump.CancelSetup();
-                        Repaint();
+                        string selected = EditorUtility.OpenFilePanel("Choose Python 3.10–3.13", "", "");
+                        if (!string.IsNullOrEmpty(selected)) TexturePackDeepBump.Python = selected;
                     }
+                    if (GUILayout.Button(TexturePackDeepBump.Ready ? "Repair DeepBump setup" : "Install DeepBump")) TexturePackDeepBump.Install();
+                    using (new EditorGUI.DisabledScope(!TexturePackDeepBump.Ready))
+                        if (GUILayout.Button("Check installation")) TexturePackDeepBump.CheckInstallation(true);
+                    if (GUILayout.Button("Clean unused installations")) TexturePackDeepBump.CleanupUnusedInstallations();
                 }
-                else
-                {
-                    EditorGUILayout.LabelField("DeepBump", "Ready · local CPU");
-                    if (GUILayout.Button("Repair DeepBump setup")) TexturePackDeepBump.Install();
-                }
+                if (TexturePackDeepBump.Installing && GUILayout.Button("Cancel setup")) TexturePackDeepBump.CancelSetup();
+                if (busy) Repaint();
+                if (!string.IsNullOrEmpty(TexturePackDeepBump.HealthError)) DrawCopyableError(TexturePackDeepBump.HealthError);
                 if (!string.IsNullOrEmpty(TexturePackDeepBump.Status))
                 {
                     if (TexturePackDeepBump.HasError) DrawCopyableError(TexturePackDeepBump.Status);

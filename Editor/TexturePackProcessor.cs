@@ -109,6 +109,7 @@ namespace TexturePackEditor
             {
                 if (node.type == TexturePackNodeType.Height)
                 {
+                    if (node.heightInput != null) continue;
                     Texture2D source = _sources.Resolve(node);
                     if (source == null) throw new InvalidOperationException("Choose a source texture for the Height node.");
                     int limit = Mathf.Clamp(Mathf.ClosestPowerOfTwo(node.heightResolution), 128, 2048);
@@ -121,6 +122,7 @@ namespace TexturePackEditor
                         width = width, height = height,
                         key = (string.IsNullOrEmpty(path) ? Guid.NewGuid().ToString("N") : path + ":" + AssetDatabase.GetAssetDependencyHash(path)) + ":" + width + ":" + height
                     };
+                    _preparedNodes.Add(node);
                     // Center/strength/blend changes only remap the solved image. Pin the cached
                     // array for this job before skipping capture, even if the shared cache evicts it.
                     if (!TexturePackHeight.TryCaptureCachedMap(node, node.heightInput))
@@ -128,7 +130,6 @@ namespace TexturePackEditor
                         node.heightInput.backend = node.heightMode == TexturePackHeightMode.DeepBump ? TexturePackDeepBump.Capture() : null;
                         node.heightInput.pixels = ReadLinearCompact(source, width, height, new Rect(0, 0, 1, 1));
                     }
-                    _preparedNodes.Add(node);
                     continue;
                 }
                 if (node.type != TexturePackNodeType.Sample || node.preparedPixels != null ||
@@ -185,6 +186,7 @@ namespace TexturePackEditor
             {
                 node.preparedPixels = null;
                 node.preparedCompactPixels = null;
+                node.heightInput?.backend?.Dispose();
                 node.heightInput = null;
                 node.preparedHeight = null;
             }

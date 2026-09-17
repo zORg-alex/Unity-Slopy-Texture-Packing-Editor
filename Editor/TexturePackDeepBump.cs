@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -13,14 +14,34 @@ namespace TexturePackEditor
     [InitializeOnLoad]
     public static class TexturePackDeepBump
     {
-        internal sealed class Configuration
+        internal sealed class Configuration : IDisposable
         {
             internal string root, python, script;
+            internal bool leased;
+            public void Dispose()
+            {
+                lock (InstallationLock)
+                {
+                    if (!leased) return;
+                    leased = false;
+                    if (--Leases[root] == 0) Leases.Remove(root);
+                }
+            }
         }
+
+        private static readonly object InstallationLock = new();
+        private static readonly Dictionary<string, int> Leases = new(StringComparer.OrdinalIgnoreCase);
 
         private static readonly CancellationTokenSource Lifetime = new();
         private static CancellationTokenSource setupCancellation;
         private static Task setupTask;
+        private static Task healthTask, cleanupTask;
+        private static volatile string healthRoot;
+        public static volatile string HealthError;
+        private static volatile bool healthVerified;
+        public static bool Checking => healthTask != null && !healthTask.IsCompleted;
+        public static bool Cleaning => cleanupTask != null && !cleanupTask.IsCompleted;
+        public static bool Healthy => Ready && healthRoot == ActiveRoot && healthVerified;
         public static volatile string Status;
         public static volatile bool HasError;
         public static bool Installing => setupTask != null && !setupTask.IsCompleted;
@@ -32,12 +53,26 @@ namespace TexturePackEditor
                 string pointer = Path.Combine(Root, "active.txt");
                 if (!File.Exists(pointer)) return Root;
                 string id = File.ReadAllText(pointer).Trim();
-                if (!Guid.TryParseExact(id, "N", out _)) throw new InvalidDataException("Invalid DeepBump installation pointer.");
+                if (!Guid.TryParseExact(id, "N", out _)) return Path.Combine(Root, "invalid-installation");
                 return Path.Combine(Root, "installations", id);
             }
         }
-        public static bool Ready => File.Exists(Path.Combine(ActiveRoot, "ready.txt")) && File.Exists(Path.Combine(ActiveRoot, "python.txt")) &&
-            File.Exists(Path.Combine(ActiveRoot, "deepbump256.onnx"));
+        public static bool Ready
+            => InstallationPresent(ActiveRoot);
+
+        internal static bool InstallationPresent(string root)
+        {
+                try
+                {
+                    return File.Exists(Path.Combine(root, "ready.txt")) && File.Exists(Path.Combine(root, "python.txt")) &&
+                        File.Exists(File.ReadAllText(Path.Combine(root, "python.txt")).Trim()) &&
+                        File.Exists(Path.Combine(root, "packages", "onnxruntime", "__init__.py")) &&
+                        File.Exists(Path.Combine(root, "packages", "numpy", "__init__.py")) &&
+                        File.Exists(Path.Combine(root, "deepbump256.onnx"));
+                }
+                catch (IOException) { return false; }
+                catch (UnauthorizedAccessException) { return false; }
+        }
         public static string Python
         {
             get => EditorPrefs.GetString("TexturePackDeepBump.Python:" + Root,
@@ -62,13 +97,87 @@ namespace TexturePackEditor
             if (source == null) throw new InvalidOperationException("Cannot locate the DeepBump worker.");
             string script = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(source), "TexturePackDeepBump.py"));
             if (!File.Exists(script)) throw new InvalidOperationException("The DeepBump Python worker is missing.");
-            return new Configuration { root = requireReady ? ActiveRoot : Root,
-                python = requireReady ? File.ReadAllText(Path.Combine(ActiveRoot, "python.txt")).Trim() : Python, script = script };
+            lock (InstallationLock)
+            {
+                var config = new Configuration { root = requireReady ? ActiveRoot : Root,
+                    python = requireReady ? File.ReadAllText(Path.Combine(ActiveRoot, "python.txt")).Trim() : Python, script = script };
+                if (requireReady) Lease(config);
+                return config;
+            }
+        }
+
+        private static void Lease(Configuration config)
+        {
+            lock (InstallationLock)
+            {
+                Leases.TryGetValue(config.root, out int count);
+                Leases[config.root] = count + 1;
+                config.leased = true;
+            }
+        }
+
+        public static void CheckInstallation(bool force = false)
+        {
+            if (Installing || Checking || !Ready || !force && healthRoot == ActiveRoot) return;
+            Configuration config = Capture();
+            healthRoot = config.root;
+            healthVerified = false;
+            HealthError = null;
+            healthTask = Task.Run(() =>
+            {
+                using (config)
+                {
+                    try
+                    {
+                        Run(config.python, new[] { "-I", config.script, "--root", config.root, "--check" }, Lifetime.Token);
+                        healthVerified = true;
+                    }
+                    catch (OperationCanceledException) { }
+                    catch (Exception e) { HealthError = e.Message; }
+                }
+            });
+        }
+
+        public static void CleanupUnusedInstallations()
+        {
+            if (Installing || Cleaning) return;
+            string directory = Path.Combine(Root, "installations");
+            cleanupTask = Task.Run(() =>
+            {
+                try
+                {
+                    int removed = CleanupDirectories(directory, ActiveRoot);
+                    Status = "Removed " + removed + " unused installation(s).";
+                    HasError = false;
+                }
+                catch (OperationCanceledException) { }
+                catch (Exception e) { Status = e.Message; HasError = true; }
+            });
+        }
+
+        internal static int CleanupDirectories(string directory, string active)
+        {
+            int removed = 0;
+            if (!Directory.Exists(directory)) return removed;
+            foreach (string path in Directory.GetDirectories(directory))
+            {
+                Lifetime.Token.ThrowIfCancellationRequested();
+                // Only installer-owned GUID directories; never follow links or delete an active job's runtime.
+                if (!Guid.TryParseExact(Path.GetFileName(path), "N", out _) ||
+                    (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) continue;
+                lock (InstallationLock)
+                {
+                    if (string.Equals(path, active, StringComparison.OrdinalIgnoreCase) || Leases.ContainsKey(path)) continue;
+                    Directory.Delete(path, true);
+                    removed++;
+                }
+            }
+            return removed;
         }
 
         public static void Install()
         {
-            if (Installing) return;
+            if (Installing || Checking || Cleaning) return;
             HasError = false;
             Configuration configuration = Capture(false);
             string root = configuration.root;
@@ -93,6 +202,9 @@ namespace TexturePackEditor
                     File.WriteAllText(temporary, installationId);
                     if (File.Exists(pointer)) File.Replace(temporary, pointer, null);
                     else File.Move(temporary, pointer);
+                    healthRoot = configuration.root;
+                    healthVerified = true;
+                    HealthError = null;
                     Status = "DeepBump ready.";
                 }
                 catch (OperationCanceledException) { Status = "DeepBump setup cancelled."; }

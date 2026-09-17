@@ -84,6 +84,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--install-model", action="store_true")
+    parser.add_argument("--check", action="store_true")
     parser.add_argument("--input", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--width", type=int)
@@ -93,12 +94,13 @@ def main():
     args.root.mkdir(parents=True, exist_ok=True)
     runtime = session(args.root, args.install_model)
     import numpy as np
-    if args.install_model:
+    if args.install_model or args.check:
         probe = runtime.run(None, {runtime.get_inputs()[0].name: np.full((1, 1, 256, 256), .5, np.float32)})[0]
         if probe.shape != (1, 3, 256, 256) or not np.isfinite(probe).all():
             raise ValueError("DeepBump model self-test failed")
-        (args.root / "python.txt").write_text(sys.executable, encoding="utf-8")
-        (args.root / "ready.txt").write_text(MODEL_HASH, encoding="ascii")
+        if args.install_model:
+            (args.root / "python.txt").write_text(sys.executable, encoding="utf-8")
+            (args.root / "ready.txt").write_text(MODEL_HASH, encoding="ascii")
         print("DeepBump ready: CPU inference self-test passed")
         return
     if not args.input or not args.output or not args.width or not args.height:
